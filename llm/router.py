@@ -27,6 +27,9 @@ _MAX_RETRIES = 4
 _RETRY_BASE_DELAY = 2.0  # seconds; doubles each attempt
 
 LLM_TIMEOUT = 120  # seconds; hung API calls are cancelled and re-raise TimeoutError
+# CPU llama.cpp inference is slow (long prompts can take 2+ min); give it a wider
+# timeout than cloud providers so legitimate calls aren't killed.
+LLAMA_CPP_TIMEOUT = 300
 
 from config.settings import settings
 
@@ -45,6 +48,8 @@ def _build_cycle() -> itertools.cycle:
         return itertools.cycle(["openrouter"])
     if settings.llm_provider == "ollama":
         return itertools.cycle(["ollama"])
+    if settings.llm_provider == "llama_cpp":
+        return itertools.cycle(["llama_cpp"])
 
     # "auto" — include only providers that have a key set
     available: list[str] = []
@@ -56,11 +61,13 @@ def _build_cycle() -> itertools.cycle:
         available.append("openrouter")
     if settings.ollama_base_url:
         available.append("ollama")
+    if settings.llama_cpp_base_url:
+        available.append("llama_cpp")
 
     if not available:
         raise RuntimeError(
             "No LLM provider configured. Set ANTHROPIC_API_KEY, DEEPSEEK_API_KEY, "
-            "OPENROUTER_API_KEY, or OLLAMA_BASE_URL."
+            "OPENROUTER_API_KEY, OLLAMA_BASE_URL, or LLAMA_CPP_BASE_URL."
         )
 
     return itertools.cycle(available)
@@ -71,6 +78,15 @@ _provider_cycle = _build_cycle()
 
 def _next_provider() -> str:
     return next(_provider_cycle)
+
+
+def llama_cpp_active() -> bool:
+    """True when llama.cpp will serve LLM calls — either the explicit provider or
+    part of the `auto` round-robin. Callers that must serialize local inference
+    (a single-slot CPU server) use this to decide whether to cap concurrency."""
+    if settings.llm_provider == "llama_cpp":
+        return True
+    return settings.llm_provider == "auto" and bool(settings.llama_cpp_base_url)
 
 
 # ── Anthropic call ─────────────────────────────────────────────────────────────
@@ -94,70 +110,77 @@ async def _call_anthropic(system: str, user: str, max_tokens: int) -> str:
     return "".join(text_blocks).strip()
 
 
-# ── DeepSeek call (OpenAI-compatible) ─────────────────────────────────────────
+# ── OpenAI-compatible calls (DeepSeek, OpenRouter, Ollama, llama.cpp) ─────────
 
-async def _call_deepseek(system: str, user: str, max_tokens: int) -> str:
+async def _openai_chat(
+    *, api_key: str, base_url: str, model: str, max_tokens: int,
+    system: str, user: str,
+    headers: dict | None = None,
+    think: bool | None = None,
+) -> str:
+    """Shared OpenAI-compatible chat call. `think` toggles `reasoning_effort` for
+    local thinking models; pass None (the default) to omit the param entirely."""
     from openai import AsyncOpenAI
 
-    client = AsyncOpenAI(
-        api_key=settings.deepseek_api_key,
-        base_url=settings.deepseek_base_url,
-    )
-    response = await client.chat.completions.create(
-        model=settings.deepseek_model,
-        max_tokens=max_tokens,
-        messages=[
+    client_kwargs = {"api_key": api_key, "base_url": base_url}
+    if headers:
+        client_kwargs["default_headers"] = headers
+    client = AsyncOpenAI(**client_kwargs)
+
+    create_kwargs = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-    )
+    }
+    if think is not None:
+        create_kwargs["reasoning_effort"] = "high" if think else "none"
+
+    response = await client.chat.completions.create(**create_kwargs)
     return (response.choices[0].message.content or "").strip()
 
 
-# ── OpenRouter call (OpenAI-compatible) ───────────────────────────────────────
+async def _call_deepseek(system: str, user: str, max_tokens: int) -> str:
+    return await _openai_chat(
+        api_key=settings.deepseek_api_key, base_url=settings.deepseek_base_url,
+        model=settings.deepseek_model, max_tokens=max_tokens,
+        system=system, user=user,
+    )
+
 
 async def _call_openrouter(system: str, user: str, max_tokens: int) -> str:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_base_url,
-        default_headers={
+    return await _openai_chat(
+        api_key=settings.openrouter_api_key, base_url=settings.openrouter_base_url,
+        model=settings.openrouter_model, max_tokens=max_tokens,
+        system=system, user=user,
+        headers={
             "HTTP-Referer": "https://github.com/Donvink/swiss-job-hunter",
             "X-Title": "Swiss Job Hunter",
         },
     )
-    response = await client.chat.completions.create(
-        model=settings.openrouter_model,
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    return (response.choices[0].message.content or "").strip()
 
-
-# ── Ollama call (OpenAI-compatible) ───────────────────────────────────────────
 
 async def _call_ollama(system: str, user: str, max_tokens: int) -> str:
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(
-        api_key="ollama",  # Ollama ignores the key but the SDK requires a non-empty string
-        base_url=settings.ollama_base_url,
-    )
-    response = await client.chat.completions.create(
-        model=settings.ollama_model,
-        max_tokens=max_tokens,
-        reasoning_effort="high" if settings.ollama_think else "none",
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
+    return await _openai_chat(
+        api_key="ollama", base_url=settings.ollama_base_url,
+        model=settings.ollama_model, max_tokens=max_tokens,
+        system=system, user=user, think=settings.ollama_think,
     )
 
-    return (response.choices[0].message.content or "").strip()
+
+async def _call_llama_cpp(system: str, user: str, max_tokens: int) -> str:
+    # llama.cpp ignores OpenAI's `reasoning_effort`; thinking models (e.g. Qwen3)
+    # toggle chain-of-thought via the /no_think token instead. Thinking is on by
+    # default, so only append the token when the user has disabled it.
+    if not settings.llama_cpp_think:
+        user = f"{user}\n/no_think"
+    return await _openai_chat(
+        api_key="llama_cpp", base_url=settings.llama_cpp_base_url,
+        model=settings.llama_cpp_model, max_tokens=max_tokens,
+        system=system, user=user,
+    )
 
 
 # ── Public interface ───────────────────────────────────────────────────────────
@@ -172,6 +195,8 @@ def _provider_endpoint(p: str) -> str:
         return settings.openrouter_base_url
     if p == "ollama":
         return settings.ollama_base_url or "(OLLAMA_BASE_URL not set)"
+    if p == "llama_cpp":
+        return settings.llama_cpp_base_url or "(LLAMA_CPP_BASE_URL not set)"
     return "?"
 
 
@@ -197,13 +222,16 @@ async def call_llm(
         coro = _call_openrouter(system, user, max_tokens)
     elif p == "ollama":
         coro = _call_ollama(system, user, max_tokens)
+    elif p == "llama_cpp":
+        coro = _call_llama_cpp(system, user, max_tokens)
     else:
         raise ValueError(f"Unknown provider: {p}")
 
     last_exc: Exception | None = None
+    timeout = LLAMA_CPP_TIMEOUT if p == "llama_cpp" else LLM_TIMEOUT
     for attempt in range(_MAX_RETRIES):
         try:
-            text = await asyncio.wait_for(coro, timeout=LLM_TIMEOUT)
+            text = await asyncio.wait_for(coro, timeout=timeout)
             return text, p
         except Exception as exc:
             status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
@@ -223,6 +251,8 @@ async def call_llm(
                         coro = _call_openrouter(system, user, max_tokens)
                     elif p == "ollama":
                         coro = _call_ollama(system, user, max_tokens)
+                    elif p == "llama_cpp":
+                        coro = _call_llama_cpp(system, user, max_tokens)
                 continue
             raise RuntimeError(f"[{p} @ {_provider_endpoint(p)}] {exc}") from exc
     raise RuntimeError(f"[{p} @ {_provider_endpoint(p)}] {last_exc}") from last_exc

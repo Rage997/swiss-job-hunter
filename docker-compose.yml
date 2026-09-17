@@ -48,5 +48,44 @@ services:
       - backend
     restart: unless-stopped
 
+  llama-cpu:
+    # Optional bundled local LLM (CPU-only) for CV-vs-job scoring.
+    # Only built/started when COMPOSE_PROFILES=llama is set in .env; otherwise this
+    # service is never created (point LLAMA_CPP_BASE_URL at your own server instead).
+    # Model auto-downloads from HF on first start into the volume.
+    # Tuned via LLAMA_CPP_HF_REPO / LLAMA_CPP_CTX / LLAMA_CPP_NGL in .env.
+    profiles: ["llama"]
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: sjh-llama-cpu
+    environment:
+      - HF_HOME=/models
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "-hf"
+      - "${LLAMA_CPP_HF_REPO:-unsloth/Qwen3.5-9B-GGUF:UD-Q4_K_XL}"
+      - "--alias"
+      - "${LLAMA_CPP_MODEL:-qwen3.5-9b}"
+      - "-c"
+      - "${LLAMA_CPP_CTX:-8192}"
+      - "-ngl"
+      - "${LLAMA_CPP_NGL:-0}"
+      - "-np"
+      - "${LLAMA_CPP_NP:-1}"
+    volumes:
+      - llama-cpu-models:/models
+    ports:
+      - "8001:8080"   # host access for debugging; backend reaches it by service name
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 300s   # ~5.5GB model download on first boot
+
 volumes:
   hf-cache: {}
+  llama-cpu-models: {}

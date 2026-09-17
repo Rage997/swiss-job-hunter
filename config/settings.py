@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     ollama_base_url: str = ""
     ollama_model: str = "qwen3.6:latest"
     ollama_think: bool = False
+    # ── llama.cpp (OpenAI-compatible local server, e.g. `llama-server`) ──────
+    llama_cpp_base_url: str = ""
+    llama_cpp_model: str = ""
+    llama_cpp_think: bool = False
 
     # ── LLM routing ────────────────────────────────────────────────────────────
     # "auto"        → round-robin between all configured providers
@@ -44,7 +48,8 @@ class Settings(BaseSettings):
     # "deepseek"    → always use DeepSeek
     # "openrouter"  → always use OpenRouter
     # "ollama"      → always use Ollama (local, no API key required)
-    llm_provider: Literal["auto", "anthropic", "deepseek", "openrouter", "ollama"] = "auto"
+    # "llama_cpp"   → always use a local llama.cpp server (OpenAI-compatible)
+    llm_provider: Literal["auto", "anthropic", "deepseek", "openrouter", "ollama", "llama_cpp"] = "auto"
 
     # ── Database ───────────────────────────────────────────────────────────────
     database_url: str = "sqlite:///./data/jobs.db"
@@ -130,11 +135,12 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def check_at_least_one_llm(self) -> "Settings":
         has_cloud = self.anthropic_api_key or self.deepseek_api_key or self.openrouter_api_key
-        has_local = bool(self.ollama_base_url)
+        has_local = bool(self.ollama_base_url) or bool(self.llama_cpp_base_url)
         if not has_cloud and not has_local:
             raise ValueError(
                 "At least one LLM provider is required: set ANTHROPIC_API_KEY, "
-                "DEEPSEEK_API_KEY, OPENROUTER_API_KEY, or OLLAMA_BASE_URL in .env"
+                "DEEPSEEK_API_KEY, OPENROUTER_API_KEY, OLLAMA_BASE_URL, or "
+                "LLAMA_CPP_BASE_URL in .env"
             )
         return self
 

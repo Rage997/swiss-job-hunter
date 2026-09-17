@@ -93,7 +93,7 @@ That's it. Contributions of new country scrapers are very welcome — open a PR!
 - Python 3.11+
 - Node.js 18+
 - At least one LLM API key: [Anthropic](https://console.anthropic.com), [DeepSeek](https://platform.deepseek.com), or [OpenRouter](https://openrouter.ai/keys)
-- Or use Ollama!
+- Or use Ollama or a local llama.cpp server!
 
 ### 1. Clone & install
 
@@ -122,12 +122,18 @@ OPENROUTER_API_KEY=sk-or-...   # OpenRouter — access 100+ models via one key
 OPENROUTER_MODEL=openai/gpt-4o-mini  # any model slug from openrouter.ai/models
 OLLAMA_BASE_URL=http://localhost:11434/v1
 OLLAMA_MODEL=qwen3.6:latest
-LLM_PROVIDER=auto              # auto | anthropic | deepseek | openrouter | ollama
+LLM_PROVIDER=auto              # auto | anthropic | deepseek | openrouter | ollama | llama_cpp
 ```
 
 > **LLM routing** — `auto` round-robins between every provider whose key is set.
 > Pin to a single provider with `LLM_PROVIDER=openrouter` (or `anthropic` / `deepseek`).
 > Only one key is required; all four can coexist.
+>
+> **Local LLM (no API key)** — run your own `llama-server` and set `LLM_PROVIDER=llama_cpp`
+> + `LLAMA_CPP_BASE_URL=http://localhost:8080/v1`. Or let Docker run it for you: set
+> `LLM_PROVIDER=llama_cpp`, `COMPOSE_PROFILES=llama`, and
+> `LLAMA_CPP_BASE_URL=http://llama-cpu:8080/v1` — `docker compose up` then builds the
+> bundled `llama-cpu` service and downloads the model on first boot.
 
 ### 3. Add your CV
 
@@ -344,7 +350,7 @@ sjh digest
 | Scraping | `httpx`, `playwright`, `beautifulsoup4` |
 | Dedup | SHA-256 + `sentence-transformers` (MiniLM-L6) |
 | Storage | SQLite + SQLAlchemy 2.x |
-| LLM | Anthropic Claude, DeepSeek, OpenRouter (OpenAI-compatible) |
+| LLM | Anthropic Claude, DeepSeek, OpenRouter, Ollama, llama.cpp |
 | Backend | FastAPI + SSE streaming |
 | Frontend | React 18 + Vite |
 | CLI | Typer + Rich |

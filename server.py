@@ -205,14 +205,39 @@ def update_status(job_id: int, body: dict):
 # ── SSE streaming commands ─────────────────────────────────────────────────────
 
 async def sse(gen: AsyncGenerator[str, None]) -> StreamingResponse:
+    # Keepalive interval (seconds). Proxies (nginx default proxy_read_timeout=60s)
+    # drop idle SSE connections; a comment line every KEEPALIVE seconds keeps the
+    # stream alive through long LLM calls. Clients ignore ":" comment lines.
+    KEEPALIVE = 15
     async def wrapper():
+        q: asyncio.Queue = asyncio.Queue()
+        sentinel = object()
+        async def feeder():
+            try:
+                async for line in gen:
+                    await q.put(line)
+            except Exception as e:
+                await q.put(e)
+            finally:
+                await q.put(sentinel)
+        feeder_task = asyncio.ensure_future(feeder())
         try:
-            async for line in gen:
-                safe = line.replace("\n", " ")
+            while True:
+                try:
+                    item = await asyncio.wait_for(q.get(), timeout=KEEPALIVE)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if item is sentinel:
+                    break
+                if isinstance(item, Exception):
+                    yield f"data: ✗ Internal error: {str(item)[:400]}\n\n"
+                    break
+                safe = item.replace("\n", " ")
                 yield f"data: {safe}\n\n"
-        except Exception as e:
-            yield f"data: ✗ Internal error: {str(e)[:400]}\n\n"
         finally:
+            if not feeder_task.done():
+                feeder_task.cancel()
             yield "data: [DONE]\n\n"
     return StreamingResponse(
         wrapper(),
@@ -523,6 +548,7 @@ async def run_analyze(req: AnalyzeRequest):
         from analyzer.scorer import fast_score, llm_score, load_cv_text, load_cv_keywords
         from db.models import Job, JobStatus
         from db.session import get_session
+        from llm.router import llama_cpp_active
 
         try:
             cv_text = load_cv_text(direction=req.direction or None)
@@ -551,6 +577,11 @@ async def run_analyze(req: AnalyzeRequest):
         shortlisted = 0
 
         if req.llm:
+            # CPU llama.cpp server runs a single slot (-np 1); firing concurrent
+            # requests queues them past LLM_TIMEOUT. Cap to 1 whenever llama.cpp
+            # will serve calls (explicit provider or in the auto round-robin).
+            if llama_cpp_active():
+                req.concurrency = 1
             # Load dynamic CV keywords once for pre-filter (cached per CV file)
             yield f"→ Loading CV keywords for pre-filter..."
             cv_keywords = await load_cv_keywords(cv_text, direction=req.direction or None)
