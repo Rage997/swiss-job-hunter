@@ -127,6 +127,9 @@ class Settings(BaseSettings):
     # ── CV ─────────────────────────────────────────────────────────────────────
     cv_pdf_path: Path = Path("./data/cv.pdf")
     cv_text_path: Path = Path("./data/cv.txt")
+    # Direction applied when the UI runs with "ALL" selected. Leave empty if you
+    # keep a single CV — jobs then stay unlabelled and score against cv.txt.
+    default_direction: str = ""
 
     # ── Scheduler ──────────────────────────────────────────────────────────────
     schedule_enabled: bool = False

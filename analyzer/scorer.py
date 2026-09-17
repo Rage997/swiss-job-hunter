@@ -187,13 +187,13 @@ async def load_cv_keywords(
     Cache stored at data/cv_keywords_{direction}.json, invalidated by CV mtime.
     Falls back to hardcoded _COMPILED if extraction fails.
     """
+    direction = resolve_direction(direction)
     cache_key = direction or "default"
     cache_file = Path(f"./data/cv_keywords_{cache_key}.json")
 
     if cv_path is None:
         try:
-            from config.settings import Settings
-            cv_path = Settings().cv_text_path
+            cv_path = cv_path_for(direction)
         except Exception:
             cv_path = None
 
@@ -352,7 +352,22 @@ Return ONLY valid JSON (no markdown):
     )
 
 
+def resolve_direction(direction: Optional[str]) -> Optional[str]:
+    """Fall back to settings.default_direction when no direction was requested."""
+    return direction or settings.default_direction or None
+
+
+def cv_path_for(direction: Optional[str] = None) -> Path:
+    """The CV file that scoring will actually read for this direction."""
+    if direction:
+        candidate = Path(f"./data/cv_{direction}.txt")
+        if candidate.exists():
+            return candidate
+    return settings.cv_text_path
+
+
 def load_cv_text(path: Optional[Path] = None, direction: Optional[str] = None) -> str:
+    direction = resolve_direction(direction)
     if direction:
         candidate = Path(f"./data/cv_{direction}.txt")
         if candidate.exists():

@@ -267,11 +267,13 @@ async def run_search(req: SearchRequest):
     async def gen():
         from scrapers import SCRAPER_REGISTRY
         from dedup.exact import get_or_create_job, is_exact_duplicate
+        from analyzer.scorer import resolve_direction
         from db import init_db
         from db.models import RawJob
         from db.session import get_session
         init_db()
 
+        direction = resolve_direction(req.direction)
         kw_list = req.keywords if req.keywords else [req.keyword]
         if not req.sources:
             yield "✗ No sources selected"
@@ -300,7 +302,7 @@ async def run_search(req: SearchRequest):
                         try:
                             if is_exact_duplicate(scraped.title, scraped.company, scraped.location):
                                 continue
-                            job, created = get_or_create_job(scraped, direction=req.direction or None)
+                            job, created = get_or_create_job(scraped, direction=direction)
                             if created:
                                 try:
                                     with get_session() as session:
@@ -323,6 +325,7 @@ async def run_search(req: SearchRequest):
             except Exception as e:
                 partial = f", saved {new_count} before failure" if new_count else ""
                 await queue.put(f"✗ {source_name} failed{partial}: {str(e)[:120]}")
+                failed_sources.append(source_name)
                 return new_count
             if found_count == 0:
                 await queue.put(f"✓ {source_name}: +0 new jobs (scraper returned 0 results)")
@@ -332,6 +335,7 @@ async def run_search(req: SearchRequest):
                 await queue.put(f"✓ {source_name}: +{new_count} new jobs")
             return new_count
 
+        failed_sources: list[str] = []
         for kw_idx, kw in enumerate(kw_list):
             if kw_idx > 0 and linkedin_in_sources:
                 yield f"⏳ LinkedIn cooldown 5s..."
@@ -359,7 +363,13 @@ async def run_search(req: SearchRequest):
             results = await asyncio.gather(*tasks, return_exceptions=True)
             total_new += sum(r for r in results if isinstance(r, int))
 
-        yield f"✓ Done — {total_new} total new jobs"
+        if failed_sources:
+            # A broken source is not a quiet one: name it in the summary so a
+            # dead board cannot hide behind a green "Done".
+            broken = ", ".join(sorted(set(failed_sources)))
+            yield f"✓ Done — {total_new} total new jobs · ✗ failed: {broken}"
+        else:
+            yield f"✓ Done — {total_new} total new jobs"
     return await sse(gen())
 
 
@@ -545,16 +555,23 @@ async def run_analyze(req: AnalyzeRequest):
     async def gen():
         import asyncio
         from asyncio import Queue
-        from analyzer.scorer import fast_score, llm_score, load_cv_text, load_cv_keywords
+        from analyzer.scorer import (
+            fast_score, llm_score, load_cv_text, load_cv_keywords,
+            cv_path_for, resolve_direction,
+        )
         from db.models import Job, JobStatus
         from db.session import get_session
         from llm.router import llama_cpp_active
 
+        direction = resolve_direction(req.direction)
         try:
-            cv_text = load_cv_text(direction=req.direction or None)
+            cv_text = load_cv_text(direction=direction)
         except FileNotFoundError as e:
             yield f"✗ {e}"
             return
+        yield f"→ Scoring with CV: {cv_path_for(direction)}" + (
+            f" (direction: {direction})" if direction else ""
+        )
 
         with get_session() as session:
             statuses = list(JobStatus)  # all statuses when rescoring
@@ -584,7 +601,7 @@ async def run_analyze(req: AnalyzeRequest):
                 req.concurrency = 1
             # Load dynamic CV keywords once for pre-filter (cached per CV file)
             yield f"→ Loading CV keywords for pre-filter..."
-            cv_keywords = await load_cv_keywords(cv_text, direction=req.direction or None)
+            cv_keywords = await load_cv_keywords(cv_text, direction=direction)
             yield f"→ Loaded {len(cv_keywords)} keywords, pre-filter threshold: {req.min_keyword_score:.0%}"
 
             queue: Queue = Queue()

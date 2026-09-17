@@ -118,10 +118,11 @@ def test_compose_passes_api_base_url_with_localhost_default() -> None:
 
 def test_app_jsx_reads_build_time_api_url_with_fallback() -> None:
     app = _read("ui/src/App.jsx")
+    # Runtime injection wins, then the build-time env var, then local compose.
     assert (
-        'const API = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8765";'
-        in app
-    )
+        'const API = window.__API_BASE_URL__ || import.meta.env.VITE_API_BASE_URL '
+        '|| "http://localhost:8765";'
+    ) in app
 
 
 # ── nginx ────────────────────────────────────────────────────────────────────
