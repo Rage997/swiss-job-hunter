@@ -4,11 +4,11 @@
 
 **Automated job search, scoring, and application tracking — built for Switzerland, adaptable to any country**
 
-[![Hosted](https://img.shields.io/badge/hosted-eurojobhunter.com-2e7d52)](https://eurojobhunter.com)
+[![Hosted](https://img.shields.io/badge/hosted-jobhiker.com-0f2a4a)](https://jobhiker.com)
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 
-[Features](#features) · [Quick Start](#quick-start) · [UI](#ui) · [Multi-Direction](#multi-direction-search) · [Architecture](#architecture) · [Use it anywhere](#use-it-anywhere) · [🚀 Try it hosted, free](https://eurojobhunter.com)
+[Features](#features) · [Quick Start](#quick-start) · [UI](#ui) · [Multi-Direction](#multi-direction-search) · [Architecture](#architecture) · [Use it anywhere](#use-it-anywhere) · [🥾 Try JobHiker, the hosted version](https://jobhiker.com)
 
 <video src="https://github.com/user-attachments/assets/7931b4e7-3125-4bed-aeba-bbb13644e31e" controls width="100%"></video>
 
@@ -29,20 +29,55 @@ Swiss Job Hunter automates the boring parts:
 
 ---
 
-## Roadmap & Feedback
+## 🥾 JobHiker — the hosted version
 
-### 🚀 Latest
+<div align="center">
 
-- **Jul 2026** — 🚀 **[eurojobhunter.com](https://eurojobhunter.com) is live** — the hosted version of this project, no Docker, no API keys, 100% free to use (scan, score, triage, track, get notified)
-- **Jul 2026** — Guided onboarding, daily automated scans, and Telegram/email alerts the moment a strong match appears
-- **Jun 2026** — Multi-user scheduler and AES-encrypted CV storage shipped, laying the groundwork for the hosted version
+**[jobhiker.com](https://jobhiker.com)** · every new Swiss job, read against your CV · the best ones sent to you twice a day · the application form filled in for you, ready to send
 
-### 🔭 What's next
+<a href="https://jobhiker.com"><img src="docs/jobhiker/matches.png" alt="JobHiker matches: each new posting scored against your CV, with the reason in one sentence" width="100%"></a>
 
-- Richer interview management — resume versioning, interview-stage tracking, and post-interview retrospectives, on top of the existing application tracker
-- More European job boards beyond Switzerland (DACH + EU expansion)
+</div>
 
-👉 **[Share feedback — help shape what gets built next](https://tally.so/r/0QG5L0)**
+This repository is where it started: a script I wrote for my own job search in Switzerland. **JobHiker** is
+what it grew into — the same idea, rebuilt as a product you can use without Docker, API keys or a server.
+(It launched as EuroJobHunter in July 2026 and is JobHiker since October.)
+
+- 🔎 **Every board, once** — jobs.ch, jobup.ch, JobScout24, LinkedIn and more, crawled several times a day and deduplicated into one pool of the last 30 days. Full-text search over every description.
+- 🎯 **About 150 real occupations** — pick your roles from ~150 occupations grounded in ISCO-08 (not a dozen broad categories), plus internships and apprenticeships, cantons, languages and workload.
+- 🧠 **Read against your CV** — each new posting is scored on role, experience, location and industry, with a one-sentence reason. Postings that need a language you don't speak, or years far beyond yours, are filtered out before they reach you.
+- 📬 **Sent to you, twice a day** — a digest by e-mail or Telegram at 07:30 and 16:30, employers' own postings only (no recruiter spam).
+- ✍️ **Apply faster, never blindly** — a cover-letter draft for the job, and a browser extension that fills the application form on jobs.ch, jobup.ch, LinkedIn and a growing list of employer sites — then stops. You check it and press send yourself.
+- 📋 **Track everything** — a board for every application: shortlisted, applied, interviewing, offer — with exactly what you sent.
+- 📈 **The market, daily** — [JobHiker Pulse](https://jobhiker.com/pulse): how many jobs opened today, where, and in which fields.
+- 📱 **On your phone** — open it in the phone browser and add it to the home screen; it works like an app.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/jobhiker/phone.png" alt="JobHiker on the iPhone home screen, and the dashboard on the phone"><br><sub><b>On your phone</b> — add it to the home screen; your matches, scored, wherever you are</sub></td>
+<td width="50%"><img src="docs/jobhiker/extension.png" alt="The extension fills an application form and attaches the CV and the letter"><br><sub><b>Extension</b> — the form, the CV and the cover letter filled in; sending stays with you</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/jobhiker/search.png" alt="Search every job in the pool"><br><sub><b>Search</b> — the whole pool, filterable by field, canton, language, board, contract and workload</sub></td>
+<td width="50%"><img src="docs/jobhiker/pulse-map.png" alt="JobHiker Pulse map of new jobs by canton"><br><sub><b>Pulse</b> — new jobs by canton, every day. Data: <a href="https://jobhiker.com/pulse">JobHiker Pulse</a>; canton boundaries © <a href="https://www.swisstopo.admin.ch/en/landscape-model-swissboundaries3d">swisstopo swissBOUNDARIES3D</a></sub></td>
+</tr>
+</table>
+
+**Free to start:** the first month has every feature, no card needed. Search, your board and the
+application tracker stay free after that.
+
+<div align="center">
+
+### 👉 [Try JobHiker](https://jobhiker.com) · [Share feedback](https://tally.so/r/0QG5L0)
+
+</div>
+
+### Roadmap
+
+- **Oct 2026** — 🥾 **EuroJobHunter becomes [JobHiker](https://jobhiker.com)**: ~150 occupations, cover-letter drafts, the form-filling extension, application tracker, full-text search, daily market Pulse
+- **Jul 2026** — 🚀 The hosted version goes live: no Docker, no API keys; guided onboarding, daily scans, Telegram/e-mail alerts
+- **Jun 2026** — Multi-user scheduler and AES-encrypted CV storage, the groundwork for the hosted version
+- **Next** — interview preparation and the stages after an offer; more boards beyond Switzerland
 
 ---
 
@@ -58,7 +93,7 @@ To adapt it for your country:
 
 That's it. Contributions of new country scrapers are very welcome — open a PR!
 
-> **Germany?** A hosted version targeting DACH + EU job boards is live: [EuroJobHunter](https://eurojobhunter.com)
+> **Just want to use it?** The hosted version for Switzerland is [JobHiker](https://jobhiker.com) — no setup.
 
 ---
 
@@ -123,6 +158,10 @@ OPENROUTER_MODEL=openai/gpt-4o-mini  # any model slug from openrouter.ai/models
 OLLAMA_BASE_URL=http://localhost:11434/v1
 OLLAMA_MODEL=qwen3.6:latest
 LLM_PROVIDER=auto              # auto | anthropic | deepseek | openrouter | ollama | llama_cpp
+# Optional — one sentence describing you, prepended to the LLM scoring system
+# prompt. The CV is already in the prompt, so leave this empty unless you want to
+# steer the model (e.g. toward a career change your CV does not show yet).
+CANDIDATE_PERSONA=
 ```
 
 > **LLM routing** — `auto` round-robins between every provider whose key is set.
@@ -229,7 +268,7 @@ The pipeline button is protected against double-clicks — a second click while 
 **② PIPELINE**
 - **ENRICH DESCRIPTIONS** — fetches full JDs for jobs that only have a preview snippet
 - **ENRICH + LLM SCORE** — enriches then immediately scores with LLM in one step
-- **SCORE (KEYWORD)** — fast keyword match against your CV, no API cost
+- **SCORE (KEYWORD)** — fast keyword match against your CV. The keywords are extracted from the CV by the LLM once and cached until the CV changes; every score after that is free
 - **SCORE (LLM)** — two-stage: keyword pre-filter first (skills extracted from your CV, cached to `data/cv_keywords_{direction}.json`); jobs below the threshold are archived without an LLM call, the rest get full deep analysis via Claude/DeepSeek
 - **LOOKUP COMPANIES** — generates a short LLM summary for each company, cached
 - **PREVIEW / PURGE** — dry-run or delete scored jobs below a score threshold

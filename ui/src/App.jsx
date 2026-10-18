@@ -7,6 +7,18 @@ const API = window.__API_BASE_URL__ || import.meta.env.VITE_API_BASE_URL || "htt
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+// Detail pane sizing. The clamp keeps either side from being squeezed away —
+// including on a window narrower than the width that was remembered.
+const DETAIL_W_KEY = "sjh.detailWidth";
+const DETAIL_W_DEFAULT = 400;
+const DETAIL_W_MIN = 320;   // below this the JD is unreadable
+const LIST_W_MIN = 420;     // below this the job rows truncate to uselessness
+
+function clampDetailW(w, viewport = (typeof window === "undefined" ? 1280 : window.innerWidth)) {
+  const max = Math.max(DETAIL_W_MIN, viewport - LIST_W_MIN);
+  return Math.round(Math.max(DETAIL_W_MIN, Math.min(w, max)));
+}
+
 const STATUS_META = {
   new:          { label: "NEW",         color: "#7a8fa8", bg: "rgba(122,143,168,0.10)" },
   analyzed:     { label: "ANALYZED",    color: "#4d7ab5", bg: "rgba(77,122,181,0.10)" },
@@ -359,9 +371,11 @@ function Timeline({ jobId, onRefresh }) {
 
 // ── Tracker board ─────────────────────────────────────────────────────────────
 
-function TrackerBoard({ onSelectJob }) {
+function TrackerBoard({ onSelectJob, onChanged, onChangeFailed }) {
   const [items, setItems] = useState([]);
   const [expanded, setExpanded] = useState(null);
+  const [dragId, setDragId]   = useState(null);   // card being dragged
+  const [dropCol, setDropCol] = useState(null);   // column under the cursor
 
   const load = useCallback(async () => {
     const r = await fetch(`${API}/tracker`);
@@ -370,10 +384,36 @@ function TrackerBoard({ onSelectJob }) {
 
   useEffect(() => { load(); const t = setInterval(load, 15000); return ()=>clearInterval(t); }, [load]);
 
-  const cols = ["viewed","considering","applied","interviewing","offer","rejected"];
+  // "viewed" is deliberately absent: it is set by opening a listing, not by
+  // deciding anything, so it is browsing history rather than a pipeline stage.
+  const cols = ["considering","applied","interviewing","offer","rejected","archived"];
+  // Columns a job leaves the funnel through — excluded from the "active" count.
+  const EXIT_COLS = ["rejected","archived"];
   const byStatus = Object.fromEntries(cols.map(c => [c, items.filter(j=>j.status===c)]));
 
   const fmt = iso => iso ? new Date(iso).toLocaleDateString("de-CH",{day:"2-digit",month:"2-digit"}) : "—";
+
+  // Drop a card into another column: PATCH the status, move it locally so the
+  // board does not wait on the round-trip, and tell the parent so the job list
+  // and the counters pick up the same change.
+  const moveTo = async (jobId, status) => {
+    const job = items.find(j => j.id === jobId);
+    if (!job || job.status === status) return;
+    setItems(prev => prev.map(j => j.id === jobId ? { ...j, status } : j));
+    try {
+      const r = await fetch(`${API}/jobs/${jobId}/status`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      onChanged?.(jobId, status);
+      load();
+    } catch {
+      // put the card back; no reload, the local state already matches the server
+      setItems(prev => prev.map(j => j.id === jobId ? { ...j, status: job.status } : j));
+      onChangeFailed?.(jobId, status);
+    }
+  };
 
   return (
     <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
@@ -385,7 +425,13 @@ function TrackerBoard({ onSelectJob }) {
           PROGRESS TRACKER
         </span>
         <span style={{fontSize:10,color:"#c4beb0"}}>·</span>
-        <span style={{fontSize:10,color:"#8a8278"}}>{items.length} active</span>
+        <span style={{fontSize:10,color:"#8a8278"}}>
+          {items.filter(j=>!EXIT_COLS.includes(j.status)).length} active
+        </span>
+        <span style={{fontSize:10,color:"#c4beb0"}}>·</span>
+        <span style={{fontSize:10,color:"#8a8278"}}>{items.length} total</span>
+        <span style={{fontSize:10,color:"#c4beb0"}}>·</span>
+        <span style={{fontSize:10,color:"#a8a098"}}>drag a card between columns to change its status</span>
         <div style={{flex:1}}/>
         <button onClick={load} style={{background:"none",border:"none",color:"#8a8278",cursor:"pointer",fontSize:12}}>↺</button>
       </div>
@@ -396,11 +442,19 @@ function TrackerBoard({ onSelectJob }) {
             const m = STATUS_META[col];
             const colJobs = byStatus[col] || [];
             return (
-              <div key={col} style={{
+              <div key={col}
+                onDragOver={e=>{ e.preventDefault(); if (dropCol!==col) setDropCol(col); }}
+                onDragLeave={()=>setDropCol(c=>c===col?null:c)}
+                onDrop={e=>{ e.preventDefault(); setDropCol(null);
+                  const id = parseInt(e.dataTransfer.getData("text/plain"),10);
+                  if (!Number.isNaN(id)) moveTo(id, col); setDragId(null); }}
+                style={{
                 minWidth:220,flex:1,marginRight:12,
-                background:"#ede8de",border:`1px solid ${m.color}25`,
+                background: dropCol===col ? `${m.color}0e` : "#ede8de",
+                border:`1px solid ${dropCol===col ? m.color+"70" : m.color+"25"}`,
                 borderTop:`2px solid ${m.color}`,borderRadius:6,
                 display:"flex",flexDirection:"column",maxHeight:"100%",
+                transition:"background 0.12s, border-color 0.12s",
               }}>
                 <div style={{
                   padding:"10px 12px",display:"flex",
@@ -417,12 +471,18 @@ function TrackerBoard({ onSelectJob }) {
                     ? <div style={{color:"#c4beb0",fontSize:10,textAlign:"center",padding:"20px 0"}}>empty</div>
                     : colJobs.map(j=>(
                       <div key={j.id}
+                        draggable
+                        onDragStart={e=>{ e.dataTransfer.setData("text/plain", String(j.id));
+                          e.dataTransfer.effectAllowed="move"; setDragId(j.id); }}
+                        onDragEnd={()=>{ setDragId(null); setDropCol(null); }}
                         onClick={()=>{ setExpanded(expanded===j.id?null:j.id); onSelectJob?.(j); }}
+                        title="drag to another column to change status"
                         style={{
                           background: expanded===j.id?"#ddd8cc":"#f0ece4",
                           border:`1px solid ${expanded===j.id?m.color+"45":"#d4cfc4"}`,
                           borderRadius:5,padding:"10px 11px",marginBottom:8,
-                          cursor:"pointer",transition:"all 0.15s",
+                          cursor:"grab",transition:"all 0.15s",
+                          opacity: dragId===j.id ? 0.4 : 1,
                         }}
                         onMouseEnter={e=>e.currentTarget.style.borderColor=m.color+"45"}
                         onMouseLeave={e=>e.currentTarget.style.borderColor=expanded===j.id?m.color+"45":"#d4cfc4"}
@@ -482,6 +542,13 @@ export default function App() {
   const [jobs, setJobs] = useState([]);
   const [stats, setStats] = useState({});
   const [selected, setSelected] = useState(null);
+  // Detail pane width is draggable and remembered. localStorage throws in some
+  // privacy modes, so every access is guarded and falls back to the old fixed 400.
+  const [detailW, setDetailW] = useState(() => {
+    try { return clampDetailW(parseInt(localStorage.getItem(DETAIL_W_KEY), 10) || DETAIL_W_DEFAULT); }
+    catch { return DETAIL_W_DEFAULT; }
+  });
+  const draggingRef = useRef(false);
   const [log, setLog] = useState([]);
   const [loading, setLoading] = useState({});
   const pipelineRunning = useRef(false);
@@ -489,13 +556,24 @@ export default function App() {
   const [searchKwInput, setSearchKwInput] = useState("");
   const [searchLoc, setSearchLoc] = useState("Zürich");
   const [searchSrc, setSearchSrc] = useState(SOURCES);
-  const [filterStatus, setFilterStatus] = useState("all");
+  // "active" is a client-side pseudo-status meaning everything except archived.
+  // The default used to be "all", which includes archived — so the board opened
+  // on the jobs the pipeline had already rejected, and `archived` was not even
+  // one of the filter buttons, leaving it both unavoidable and unreachable.
+  const [filterStatus, setFilterStatus] = useState("active");
   const [filterText, setFilterText] = useState("");
   const [filterMinStars, setFilterMinStars] = useState(0);
   const [filterSource, setFilterSource] = useState("all");
   const [coverLetter, setCoverLetter] = useState("");
   const [coverLang, setCoverLang] = useState("en");
-  const [threshold, setThreshold] = useState(10); // percent — shared by archive/purge/filter/lookup
+  // Two separate numbers. `minMatch` only filters what the list shows.
+  // `opsThreshold` is what gets sent to the backend as archive_below / max_score /
+  // min_score by SCORE (LLM), RESCORE ALL, LOOKUP COMPANIES, CHECK LINKS and PURGE.
+  // These used to be one state, so raising the filter to read the list also armed
+  // PURGE to delete everything below that score.
+  const [minMatch, setMinMatch] = useState(0);        // view filter only, never sent
+  const [opsThreshold, setOpsThreshold] = useState(10); // sent to destructive endpoints
+  const [sortBy, setSortBy] = useState("posted");     // posted | score | company
   const [searchPages, setSearchPages] = useState(3);
   const [keywordPresets, setKeywordPresets] = useState({});
   const [linkedinTimeRange, setLinkedinTimeRange] = useState("r604800");
@@ -518,7 +596,10 @@ export default function App() {
 
   const fetchJobs = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/jobs?status=${filterStatus}&q=${encodeURIComponent(filterText)}&direction=${direction}&min_stars=${filterMinStars}&source=${filterSource}`);
+      // The backend does not know "active", so ask for everything and let the
+      // client-side filter below narrow it.
+      const apiStatus = filterStatus === "active" ? "all" : filterStatus;
+      const r = await fetch(`${API}/jobs?status=${apiStatus}&q=${encodeURIComponent(filterText)}&direction=${direction}&min_stars=${filterMinStars}&source=${filterSource}`);
       if (r.ok) { setJobs(await r.json()); setBackendOk(true); }
     } catch {
       if (backendOk) addLog("✗ Backend offline — run: python server.py");
@@ -527,10 +608,36 @@ export default function App() {
   }, [filterStatus, filterText, direction, filterMinStars, filterSource, addLog, backendOk]);
 
   const fetchStats = useCallback(async () => {
-    try { const r=await fetch(`${API}/stats?threshold=${threshold/100}`); if(r.ok) setStats(await r.json()); } catch {}
-  }, [threshold]);
+    try { const r=await fetch(`${API}/stats?threshold=${minMatch/100}`); if(r.ok) setStats(await r.json()); } catch {}
+  }, [minMatch]);
 
   useEffect(() => { fetchJobs(); fetchStats(); }, [fetchJobs, fetchStats]);
+
+  // Divider drag, plus a re-clamp when the window changes size: a width stored on
+  // a wide display would otherwise squeeze the job list on a narrow one.
+  useEffect(() => {
+    const onMove = e => {
+      if (!draggingRef.current) return;
+      setDetailW(clampDetailW(window.innerWidth - e.clientX));
+    };
+    const onUp = () => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setDetailW(w => { try { localStorage.setItem(DETAIL_W_KEY, String(w)); } catch {} return w; });
+    };
+    const onResize = () => setDetailW(w => clampDetailW(w));
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("resize", onResize);
+    onResize();
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
 
   useEffect(() => {
     fetch(`${API}/config`).then(r=>r.ok?r.json():null).then(cfg=>{
@@ -660,13 +767,13 @@ export default function App() {
       for (const src of (enrichSources.length ? enrichSources : [searchSrc[0]||"jobs.ch"])) {
         await runStream("run/enrich", {limit:9999, source:src, rescore_llm:false, direction:dir}, `enrich-${src}`);
       }
-      await runStream("run/analyze", {limit:9999, llm:true, archive_below:threshold/100, direction:dir}, "analyze-llm");
+      await runStream("run/analyze", {limit:9999, llm:true, archive_below:opsThreshold/100, direction:dir}, "analyze-llm");
       addLog("━━━ PIPELINE DONE ━━━");
     } finally {
       pipelineRunning.current = false;
       setLoading(p=>({...p, pipeline:false}));
     }
-  }, [searchKws, searchKwInput, searchSrc, searchLoc, searchPages, direction, linkedinTimeRange, linkedinExpLevel, threshold, runStream, addLog]);
+  }, [searchKws, searchKwInput, searchSrc, searchLoc, searchPages, direction, linkedinTimeRange, linkedinExpLevel, opsThreshold, runStream, addLog]);
 
   const runPipelineKeyword = useCallback(async () => {
     if (pipelineRunning.current) { addLog("✗ Pipeline already running"); return; }
@@ -739,18 +846,33 @@ export default function App() {
   };
 
   const visible = jobs.filter(j=>
-    (filterStatus==="all"||j.status===filterStatus) &&
-    (threshold===0 || (j.match_score!=null && j.match_score*100 >= threshold))
+    (filterStatus==="all"
+      || (filterStatus==="active" ? j.status!=="archived" : j.status===filterStatus)) &&
+    (minMatch===0 || (j.match_score!=null && j.match_score*100 >= minMatch))
   );
 
-  const visibleGroups = POSTED_BUCKETS
-    .map(b => ({
-      ...b,
-      jobs: visible
-        .filter(j => postedBucket(j.posted_at) === b.key)
-        .sort((a,b2) => (b2.match_score ?? -1) - (a.match_score ?? -1)),
-    }))
-    .filter(g => g.jobs.length > 0);
+  // Date bucketing is now one sort mode among three. Grouping by posted date and
+  // only sorting by score *within* a bucket meant a 25% job posted today sat above
+  // a 93% job posted yesterday, with no way to see the best matches first.
+  const byScore = (a,b) => (b.match_score ?? -1) - (a.match_score ?? -1);
+
+  const visibleGroups = sortBy === "posted"
+    ? POSTED_BUCKETS
+        .map(b => ({
+          ...b,
+          jobs: visible.filter(j => postedBucket(j.posted_at) === b.key).sort(byScore),
+        }))
+        .filter(g => g.jobs.length > 0)
+    : [{
+        key: sortBy,
+        label: sortBy === "score" ? "Best match first" : "By company",
+        color: "#8a8278",
+        jobs: [...visible].sort(
+          sortBy === "score"
+            ? byScore
+            : (a,b) => (a.company||"").localeCompare(b.company||"") || byScore(a,b)
+        ),
+      }].filter(g => g.jobs.length > 0);
 
   const Tab = ({id,label,active,onClick}) => (
     <button onClick={onClick} style={{
@@ -834,7 +956,15 @@ export default function App() {
         <div style={{flex:1,display:"flex",overflow:"hidden"}}>
 
           {mainTab==="tracker"
-            ? <TrackerBoard onSelectJob={j=>{setSelected(j);setMainTab("board");}}/>
+            ? <TrackerBoard
+                onSelectJob={j=>{setSelected(j);setMainTab("board");}}
+                onChangeFailed={(jobId,status)=>addLog(`✗ #${jobId} → ${status} failed, moved back`)}
+                onChanged={(jobId,status)=>{
+                  setJobs(prev=>prev.map(j=>j.id===jobId?{...j,status}:j));
+                  setSelected(prev=>prev?.id===jobId?{...prev,status}:prev);
+                  fetchStats();
+                  addLog(`✓ #${jobId} → ${status}`);
+                }}/>
             : <>
               {/* LEFT PANEL */}
               <div style={{width:300,borderRight:"1px solid #d4cfc4",display:"flex",
@@ -960,7 +1090,7 @@ export default function App() {
                       loading={loading.pipeline}
                       disabled={loading.pipelineKw||loading.pipeline||loading.search||loading["analyze-llm"]||Object.keys(loading).some(k=>k.startsWith("enrich")&&loading[k])}
                       label="SEARCH + SCORE (KEYWORD + LLM)" icon="⚡" color="#9070c8"/>
-                    <Btn onClick={()=>runStream("run/check-links",{auto_archive:true,concurrency:10,min_score:threshold/100},"check-links")}
+                    <Btn onClick={()=>runStream("run/check-links",{auto_archive:true,concurrency:10,min_score:opsThreshold/100},"check-links")}
                       loading={loading["check-links"]} label="CHECK DEAD LINKS" icon="🔗"
                       color="#c06838" disabled={!stats.total}/>
                   </div>
@@ -989,20 +1119,29 @@ export default function App() {
                     <Btn onClick={()=>runStream("run/analyze",{limit:9999,llm:false,direction:direction==="all"?null:direction},"analyze")}
                       loading={loading.analyze} label="SCORE (KEYWORD)" icon="⚡"
                       color="#a87c2e" disabled={!stats.total}/>
-                    <Btn onClick={()=>runStream("run/analyze",{limit:9999,llm:true,archive_below:threshold/100,direction:direction==="all"?null:direction},"analyze-llm")}
+                    <Btn onClick={()=>runStream("run/analyze",{limit:9999,llm:true,archive_below:opsThreshold/100,direction:direction==="all"?null:direction},"analyze-llm")}
                       loading={loading["analyze-llm"]} label="SCORE (LLM)" icon="🧠"
                       color="#9070c8" disabled={!stats.total}/>
                   </div>
-                  <Btn onClick={()=>runStream("run/analyze",{llm:true,skip_scored:false,archive_below:threshold/100,concurrency:10,direction:direction==="all"?null:direction},"rescore-all")}
+                  <Btn onClick={()=>runStream("run/analyze",{llm:true,skip_scored:false,archive_below:opsThreshold/100,concurrency:10,direction:direction==="all"?null:direction},"rescore-all")}
                     loading={loading["rescore-all"]} label="RESCORE ALL" icon="🔄"
                     color="#6464a8" disabled={!stats.total}/>
 
+                  <div style={{display:"flex",alignItems:"center",gap:5,margin:"4px 0 2px",paddingLeft:2}}>
+                    <span style={{fontSize:9,color:"#b0a898",fontFamily:"monospace",letterSpacing:"0.05em"}}>ARCHIVE / PURGE BELOW</span>
+                    <input type="number" min={0} max={100} step={5} value={opsThreshold}
+                      onChange={e=>{const v=Math.max(0,Math.min(100,parseInt(e.target.value)||0));setOpsThreshold(v);}}
+                      title="sent to the backend as archive_below / max_score / min_score by the buttons in this panel. Separate from the list filter."
+                      style={{...inp,width:52,textAlign:"center",fontSize:10}}/>
+                    <span style={{fontSize:9,color:"#b0a898",fontFamily:"monospace"}}>%</span>
+                  </div>
+
                   <PipeGroup label="MAINTENANCE"/>
-                  <Btn onClick={()=>runStream("run/company-lookup",{min_score:threshold/100},"company-lookup")}
+                  <Btn onClick={()=>runStream("run/company-lookup",{min_score:opsThreshold/100},"company-lookup")}
                     loading={loading["company-lookup"]} label="LOOKUP COMPANIES" icon="🏢"
                     color="#3d8a9a" disabled={!stats.total}/>
                   <div style={{fontSize:9,color:"#b0a898",fontFamily:"monospace",marginTop:-1,paddingLeft:2}}>
-                    uses threshold ≥ {threshold}% (set in FILTER below)
+                    uses threshold ≥ {opsThreshold}% (set above)
                   </div>
 
                   <div style={{height:1,background:"#d4cfc4",margin:"6px 0 2px"}}/>
@@ -1013,11 +1152,11 @@ export default function App() {
                     <div style={{flex:1,height:1,background:"#d4cfc4"}}/>
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:5}}>
-                    <Btn onClick={()=>runStream("run/purge-archived",{max_score:threshold/100,dry_run:false},"purge")}
+                    <Btn onClick={()=>runStream("run/purge-archived",{max_score:opsThreshold/100,dry_run:false},"purge")}
                       loading={loading["purge"]} label="PURGE" icon="🗑" small color="#b84848"/>
                   </div>
                   <div style={{fontSize:9,color:"#b0a898",fontFamily:"monospace",marginTop:-1,paddingLeft:2}}>
-                    permanently deletes new/analyzed/archived jobs scoring below {threshold}% — no undo
+                    permanently deletes new/analyzed/archived jobs scoring below {opsThreshold}% — no undo
                   </div>
                 </div>
 
@@ -1028,7 +1167,7 @@ export default function App() {
                     <span style={{color:"#5e5850"}}>FILTER</span>
                   </div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:6}}>
-                    {["all","new","shortlisted","viewed","considering","applied","interviewing","offer","rejected"].map(s=>(
+                    {["active","all","new","analyzed","shortlisted","viewed","considering","applied","interviewing","offer","rejected","archived"].map(s=>(
                       <button key={s} onClick={()=>setFilterStatus(s)} style={{
                         fontSize:8,padding:"2px 7px",borderRadius:3,border:"1px solid",
                         borderColor:filterStatus===s?(STATUS_META[s]?.color||"#4d7ab5")+"55":"#d4cfc4",
@@ -1043,11 +1182,28 @@ export default function App() {
                       placeholder="search title / company..." style={{...inp,fontSize:10,flex:1}}/>
                     <div style={{display:"flex",alignItems:"center",gap:3,flexShrink:0}}>
                       <span style={{fontSize:9,color:"#a8a098",fontFamily:"monospace",whiteSpace:"nowrap"}}>≥</span>
-                      <input type="number" min={0} max={100} step={5} value={threshold}
-                        onChange={e=>{const v=Math.max(0,Math.min(100,parseInt(e.target.value)||0));setThreshold(v);}}
-                        title="score threshold % — used by filter, archive, purge, lookup, check-links" style={{...inp,width:52,textAlign:"center",fontSize:10}}/>
+                      <input type="number" min={0} max={100} step={5} value={minMatch}
+                        onChange={e=>{const v=Math.max(0,Math.min(100,parseInt(e.target.value)||0));setMinMatch(v);}}
+                        title="hide jobs scoring below this — affects the list only, never sent to the backend"
+                        style={{...inp,width:52,textAlign:"center",fontSize:10}}/>
                       <span style={{fontSize:9,color:"#a8a098",fontFamily:"monospace"}}>%</span>
                     </div>
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:5}}>
+                    <span style={{fontSize:9,color:"#a8a098",fontFamily:"monospace",letterSpacing:"0.05em"}}>SORT</span>
+                    {[["score","MATCH"],["posted","DATE"],["company","COMPANY"]].map(([key,label])=>(
+                      <button key={key} onClick={()=>setSortBy(key)} title={
+                        key==="score" ? "best match first, across all dates"
+                        : key==="posted" ? "group by posting date, best match within each group"
+                        : "alphabetical by company, best match within each"
+                      } style={{
+                        fontSize:8,padding:"2px 7px",borderRadius:3,border:"1px solid",
+                        borderColor:sortBy===key?"#4d8a6855":"#d4cfc4",
+                        background:sortBy===key?"#4d8a6812":"transparent",
+                        color:sortBy===key?"#4d8a68":"#8a8278",
+                        cursor:"pointer",fontFamily:"monospace",letterSpacing:"0.05em",fontWeight:700,
+                      }}>{label}</button>
+                    ))}
                   </div>
                   <div style={{display:"flex",alignItems:"center",gap:4}}>
                     <span style={{fontSize:9,color:"#a8a098",fontFamily:"monospace"}}>★≥</span>
@@ -1176,7 +1332,20 @@ export default function App() {
               </div>
 
               {/* RIGHT PANEL */}
-              <div style={{width:400,borderLeft:"1px solid #d4cfc4",display:"flex",
+              <div
+                onMouseDown={()=>{ draggingRef.current = true;
+                  document.body.style.cursor = "col-resize";
+                  document.body.style.userSelect = "none"; }}
+                onDoubleClick={()=>{ setDetailW(clampDetailW(DETAIL_W_DEFAULT));
+                  try { localStorage.setItem(DETAIL_W_KEY, String(DETAIL_W_DEFAULT)); } catch {} }}
+                title="drag to resize · double-click to reset"
+                style={{width:5,flexShrink:0,cursor:"col-resize",background:"#d4cfc4",
+                  borderLeft:"1px solid #e0dbd0",borderRight:"1px solid #e0dbd0"}}
+                onMouseEnter={e=>e.currentTarget.style.background="#4d7ab5"}
+                onMouseLeave={e=>{ if(!draggingRef.current) e.currentTarget.style.background="#d4cfc4"; }}
+              />
+
+              <div style={{width:detailW,borderLeft:"1px solid #d4cfc4",display:"flex",
                 flexDirection:"column",background:"#ede8de",flexShrink:0}}>
                 <div style={{display:"flex",borderBottom:"1px solid #d4cfc4",flexShrink:0,background:"#e8e3d8"}}>
                   <RTab id="detail" label="DETAIL"/>
@@ -1187,6 +1356,32 @@ export default function App() {
                 </div>
 
                 {/* DETAIL TAB */}
+                {rightTab==="detail" && selected && (
+                  /* Above the scrolling pane rather than inside it: the status
+                     control is the reason the pane is open, and it used to sit
+                     below the full job description. */
+                  <div style={{
+                    flexShrink:0,padding:"8px 14px",background:"#ede8de",
+                    borderBottom:"1px solid #d4cfc4",
+                    display:"flex",alignItems:"center",gap:6,flexWrap:"wrap",
+                  }}>
+                    <span style={{fontSize:9,color:"#8a8278",letterSpacing:"0.1em",
+                      fontWeight:700,flexShrink:0}}>STATUS</span>
+                    {["viewed","considering","shortlisted","applied","interviewing","offer","rejected","archived"].map(s=>(
+                      <button key={s} onClick={()=>{
+                        if(s==="applied") setApplyModal(true);
+                        else updateStatus(selected.id,s);
+                      }} style={{
+                        fontSize:8,padding:"4px 8px",borderRadius:3,
+                        border:`1px solid ${STATUS_META[s]?.color||"#8a8278"}${selected.status===s?"90":"35"}`,
+                        background:selected.status===s?`${STATUS_META[s]?.color}22`:"transparent",
+                        color:STATUS_META[s]?.color||"#8a8278",
+                        cursor:"pointer",fontFamily:"monospace",fontWeight:700,letterSpacing:"0.05em",
+                      }}>{s.toUpperCase()}</button>
+                    ))}
+                  </div>
+                )}
+
                 {rightTab==="detail" && (
                   <div style={{flex:1,overflowY:"auto",padding:18}}>
                     {!selected
@@ -1272,23 +1467,6 @@ export default function App() {
                             disabled={!selected?.description} label="TAILOR CV FOR THIS JD" icon="📝" color="#a87c2e"/>
                         </div>
 
-                        <div>
-                          <div style={{fontSize:9,color:"#8a8278",letterSpacing:"0.1em",fontWeight:700,marginBottom:7}}>UPDATE STATUS</div>
-                          <div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:10}}>
-                            {["viewed","considering","shortlisted","applied","interviewing","offer","rejected","archived"].map(s=>(
-                              <button key={s} onClick={()=>{
-                                if(s==="applied") setApplyModal(true);
-                                else updateStatus(selected.id,s);
-                              }} style={{
-                                fontSize:8,padding:"4px 8px",borderRadius:3,
-                                border:`1px solid ${STATUS_META[s]?.color||"#8a8278"}35`,
-                                background:selected.status===s?`${STATUS_META[s]?.color}18`:"transparent",
-                                color:STATUS_META[s]?.color||"#8a8278",
-                                cursor:"pointer",fontFamily:"monospace",fontWeight:700,letterSpacing:"0.05em",
-                              }}>{s.toUpperCase()}</button>
-                            ))}
-                          </div>
-                        </div>
                       </>
                     }
                   </div>

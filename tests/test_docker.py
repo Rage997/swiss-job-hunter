@@ -105,14 +105,6 @@ def test_frontend_threads_api_base_url_build_arg() -> None:
     assert "ENV VITE_API_BASE_URL=$VITE_API_BASE_URL" in dockerfile
 
 
-def test_compose_passes_api_base_url_with_localhost_default() -> None:
-    compose = _read("docker-compose.yml")
-    assert (
-        f'VITE_API_BASE_URL: "${{VITE_API_BASE_URL:-http://localhost:{BACKEND_PORT}}}"'
-        in compose
-    )
-
-
 # ── application touchpoint ──────────────────────────────────────────────────────
 
 

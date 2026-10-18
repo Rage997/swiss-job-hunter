@@ -32,6 +32,22 @@ class JobStatus(str, PyEnum):
     ARCHIVED     = "archived"
 
 
+# Statuses that record a decision the user made. Automated passes may refresh a
+# job's score and explanation but must never write `status` on these rows, or the
+# tracker silently loses the application history it exists to hold.
+USER_OWNED_STATUSES = frozenset({
+    JobStatus.CONSIDERING, JobStatus.APPLIED,
+    JobStatus.INTERVIEWING, JobStatus.OFFER, JobStatus.REJECTED,
+})
+
+# The complement the pipeline is free to move between. VIEWED and ARCHIVED are in
+# neither set: VIEWED is not a decision, and ARCHIVED should not be resurrected
+# by opening a listing.
+PIPELINE_OWNED_STATUSES = frozenset({
+    JobStatus.NEW, JobStatus.ANALYZED, JobStatus.SHORTLISTED,
+})
+
+
 class ApplicationStatus(str, PyEnum):
     PENDING        = "pending"
     SENT           = "sent"
@@ -88,6 +104,9 @@ class Job(Base):
     match_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     match_explanation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     user_stars: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # 1-5, manual interest rating
+    # True when a person archived this job rather than the pipeline. The tracker
+    # keeps those on the board so a dismissed card can be dragged back out.
+    archived_by_user: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Tracking timestamps
     viewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

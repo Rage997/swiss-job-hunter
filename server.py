@@ -199,6 +199,15 @@ def update_status(job_id: int, body: dict):
         if not job:
             raise HTTPException(404, "Job not found")
         job.status = s
+        # Distinguishes "the user dismissed this" from the pipeline archiving
+        # it, so the tracker can keep the card around to be dragged back out.
+        # Cleared on the way out so a later pipeline re-archive isn't mistaken
+        # for a user decision.
+        job.archived_by_user = (s == JobStatus.ARCHIVED)
+        # The board's drag-and-drop lands here without the apply dialog, so make
+        # sure an applied card at least carries a timestamp.
+        if s == JobStatus.APPLIED and job.applied_at is None:
+            job.applied_at = datetime.utcnow()
     return {"ok": True}
 
 
@@ -373,6 +382,23 @@ async def run_search(req: SearchRequest):
     return await sse(gen())
 
 
+# Shortlist / archive bars, shared by the two paths that assign status from a
+# score: /run/analyze and the rescore_llm branch of /run/enrich.
+DEFAULT_MIN_SCORE = 0.3      # at or above this a job is SHORTLISTED
+DEFAULT_ARCHIVE_BELOW = 0.1  # below this it is ARCHIVED
+
+_FALLBACK_KEYWORDS_WARNING = (
+    "⚠ Could not extract keywords from your CV (is an LLM provider configured?) — "
+    "keyword scores use the built-in fallback list, which does not describe your CV"
+)
+
+# Below this many characters a stored description is a search-results teaser,
+# not a job ad. One number for both halves of the loop: /run/enrich selects the
+# jobs under it, and the keyword pre-filter declines to judge them. If the two
+# differed, anything in the gap would be neither re-fetched nor scored.
+MIN_JD_CHARS = 400
+
+
 class EnrichRequest(BaseModel):
     limit: int = 50
     source: str = "jobs.ch"
@@ -393,7 +419,7 @@ async def run_enrich(req: EnrichRequest):
                 .filter(
                     (Job.description == None) |  # noqa: E711
                     (Job.description == "") |
-                    (func.length(Job.description) < 100)
+                    (func.length(Job.description) < MIN_JD_CHARS)
                 )
                 .order_by(Job.scraped_at.desc())
                 .limit(req.limit)
@@ -420,7 +446,7 @@ async def run_enrich(req: EnrichRequest):
                 if sjid:
                     job_data.append((j.id, sjid, dlen))
 
-        to_enrich = [(jid, sjid) for jid, sjid, dlen in job_data if dlen < 100]
+        to_enrich = [(jid, sjid) for jid, sjid, dlen in job_data if dlen < MIN_JD_CHARS]
         yield f"Enriching {len(to_enrich)} jobs from {req.source}..."
         if not to_enrich:
             yield f"✓ Enriched 0/0 jobs"
@@ -475,8 +501,11 @@ async def run_enrich(req: EnrichRequest):
                         with get_session() as session:
                             job = session.get(Job, job_id)
                             if job:
-                                from db.models import JobStatus
-                                job.status = JobStatus.ARCHIVED
+                                from db.models import JobStatus, USER_OWNED_STATUSES
+                                # A taken-down posting is still an application
+                                # the user is tracking — leave their status alone.
+                                if job.status not in USER_OWNED_STATUSES:
+                                    job.status = JobStatus.ARCHIVED
                         await queue.put(f"– job #{job_id} — expired, auto-archived")
                     else:
                         await queue.put(f"– job #{job_id} — no detail available")
@@ -505,7 +534,7 @@ async def run_enrich(req: EnrichRequest):
 
         if req.rescore_llm and enriched_ids:
             from analyzer.scorer import llm_score, load_cv_text
-            from db.models import JobStatus
+            from db.models import JobStatus, USER_OWNED_STATUSES
             yield f"→ LLM scoring {len(enriched_ids)} newly enriched jobs..."
             try:
                 cv_text = load_cv_text(direction=req.direction or None)
@@ -527,10 +556,11 @@ async def run_enrich(req: EnrichRequest):
                         job = session.get(Job, job_id)
                         if job:
                             job.match_score = result.score
-                            if result.score < 0.1:
-                                job.status = JobStatus.ARCHIVED
-                            elif result.score >= 0.6:
-                                job.status = JobStatus.SHORTLISTED
+                            if job.status not in USER_OWNED_STATUSES:
+                                if result.score < DEFAULT_ARCHIVE_BELOW:
+                                    job.status = JobStatus.ARCHIVED
+                                elif result.score >= DEFAULT_MIN_SCORE:
+                                    job.status = JobStatus.SHORTLISTED
                     scored += 1
                     yield f"  🧠 job #{job_id} — {round(result.score * 100)}%"
                 except Exception as e:
@@ -542,9 +572,9 @@ async def run_enrich(req: EnrichRequest):
 class AnalyzeRequest(BaseModel):
     limit: int = 100
     llm: bool = False
-    min_score: float = 0.3
+    min_score: float = DEFAULT_MIN_SCORE
     skip_scored: bool = True
-    archive_below: float = 0.1  # auto-archive jobs scoring below this (LLM mode only)
+    archive_below: float = DEFAULT_ARCHIVE_BELOW  # auto-archive below this (LLM mode only)
     min_keyword_score: float = 0.3  # skip LLM if keyword pre-filter score < this
     direction: Optional[str] = None
     concurrency: int = 10
@@ -557,9 +587,9 @@ async def run_analyze(req: AnalyzeRequest):
         from asyncio import Queue
         from analyzer.scorer import (
             fast_score, llm_score, load_cv_text, load_cv_keywords,
-            cv_path_for, resolve_direction,
+            cv_path_for, resolve_direction, is_fallback_keywords,
         )
-        from db.models import Job, JobStatus
+        from db.models import Job, JobStatus, USER_OWNED_STATUSES
         from db.session import get_session
         from llm.router import llama_cpp_active
 
@@ -586,7 +616,12 @@ async def run_analyze(req: AnalyzeRequest):
             jobs = query.order_by(Job.scraped_at.desc()).limit(lim).all()
             job_data = [(j.id, j.title, j.description) for j in jobs]
 
-        threshold = req.min_score if not req.llm else min(req.min_score, 0.2)
+        # `min(req.min_score, 0.2)` used to cap this in LLM mode, so the bar could
+        # only ever be lowered and min_score was inert above 0.2 — a 25% match the
+        # model had explicitly rejected still landed in SHORTLISTED. It also
+        # disagreed with the ⭐ in the log below, which already compares against
+        # req.min_score.
+        threshold = req.min_score
         yield f"Analyzing {len(job_data)} jobs (mode: {'LLM' if req.llm else 'keyword'}, concurrency: {req.concurrency if req.llm else 1})..."
         if not job_data:
             yield "✓ Nothing to score"
@@ -602,18 +637,33 @@ async def run_analyze(req: AnalyzeRequest):
             # Load dynamic CV keywords once for pre-filter (cached per CV file)
             yield f"→ Loading CV keywords for pre-filter..."
             cv_keywords = await load_cv_keywords(cv_text, direction=direction)
+            if is_fallback_keywords(cv_keywords):
+                yield _FALLBACK_KEYWORDS_WARNING
             yield f"→ Loaded {len(cv_keywords)} keywords, pre-filter threshold: {req.min_keyword_score:.0%}"
 
             queue: Queue = Queue()
             sem = asyncio.Semaphore(req.concurrency)
             completed = 0
-            skipped = 0
+            skipped = 0        # judged irrelevant by the keyword pre-filter
+            unenriched = 0     # no description to judge yet — not a rejection
             total = len(job_data)
 
             async def score_one(job_id: int, title: str, description: str) -> None:
-                nonlocal shortlisted, completed, skipped
+                nonlocal shortlisted, completed, skipped, unenriched
                 async with sem:
                     try:
+                        # A description too short to judge means enrichment has not
+                        # run or failed, not that the job is irrelevant. Archiving on
+                        # that score makes a scraping failure indistinguishable from a
+                        # genuine rejection, and the job silently disappears. Leave the
+                        # status untouched so the next enrich pass can retry it.
+                        if len(description or "") < MIN_JD_CHARS:
+                            unenriched += 1
+                            await queue.put(
+                                f"· #{job_id} not enriched yet — {title[:45]}"
+                            )
+                            return
+
                         # Keyword pre-filter: skip LLM if clearly irrelevant
                         kw_result = fast_score(cv_text, description or "", compiled=cv_keywords)
                         if kw_result.score < req.min_keyword_score:
@@ -622,7 +672,8 @@ async def run_analyze(req: AnalyzeRequest):
                                 if job:
                                     job.match_score = kw_result.score
                                     job.match_explanation = f"[keyword pre-filter] {kw_result.explanation}"
-                                    job.status = JobStatus.ARCHIVED
+                                    if job.status not in USER_OWNED_STATUSES:
+                                        job.status = JobStatus.ARCHIVED
                             skipped += 1
                             await queue.put(f"– #{job_id} {kw_result.score:.0%} (skipped) — {title[:45]}")
                         else:
@@ -632,13 +683,17 @@ async def run_analyze(req: AnalyzeRequest):
                                 if job:
                                     job.match_score = result.score
                                     job.match_explanation = result.explanation
-                                    if result.score >= threshold:
-                                        job.status = JobStatus.SHORTLISTED
-                                        shortlisted += 1
-                                    elif result.score < req.archive_below:
-                                        job.status = JobStatus.ARCHIVED
-                                    else:
-                                        job.status = JobStatus.ANALYZED
+                                    # Score and explanation are refreshed for every
+                                    # job; status is only reassigned for rows the
+                                    # pipeline owns.
+                                    if job.status not in USER_OWNED_STATUSES:
+                                        if result.score >= threshold:
+                                            job.status = JobStatus.SHORTLISTED
+                                            shortlisted += 1
+                                        elif result.score < req.archive_below:
+                                            job.status = JobStatus.ARCHIVED
+                                        else:
+                                            job.status = JobStatus.ANALYZED
                             score_pct = f"{result.score:.0%}"
                             icon = "⭐" if result.score >= req.min_score else ("✗" if result.score < req.archive_below else "·")
                             await queue.put(f"{icon} #{job_id} {score_pct} — {title[:45]}")
@@ -657,23 +712,48 @@ async def run_analyze(req: AnalyzeRequest):
                 yield msg
             await asyncio.gather(*tasks)
             yield f"→ Pre-filter skipped {skipped}/{total} jobs (saved ~{skipped} LLM calls)"
+            if unenriched:
+                yield (f"→ {unenriched}/{total} jobs have no description yet "
+                       f"(under {MIN_JD_CHARS} chars) — run Enrich, then score again")
         else:
+            # Same CV-derived keywords the LLM path pre-filters with. Without
+            # `compiled=` this falls back to the hardcoded _WEIGHTED_SKILLS table,
+            # which describes one specific CV and scores everyone else's jobs
+            # against it.
+            cv_keywords = await load_cv_keywords(cv_text, direction=direction)
+            if is_fallback_keywords(cv_keywords):
+                yield _FALLBACK_KEYWORDS_WARNING
+            else:
+                yield f"→ Loaded {len(cv_keywords)} keywords from CV"
+            total_kw = len(job_data)
+            unenriched = 0
             for job_id, title, description in job_data:
                 try:
-                    result = fast_score(cv_text, description or "")
+                    # Same rule as the LLM path: a teaser is not a judgement.
+                    if len(description or "") < MIN_JD_CHARS:
+                        unenriched += 1
+                        yield f"· #{job_id} not enriched yet — {title[:45]}"
+                        continue
+                    result = fast_score(cv_text, description or "", compiled=cv_keywords)
                     with get_session() as session:
                         job = session.get(Job, job_id)
                         if job:
                             job.match_score = result.score
                             job.match_explanation = result.explanation
-                            job.status = JobStatus.SHORTLISTED if result.score >= threshold else JobStatus.ANALYZED
-                            if result.score >= threshold:
-                                shortlisted += 1
+                            if job.status not in USER_OWNED_STATUSES:
+                                job.status = (JobStatus.SHORTLISTED if result.score >= threshold
+                                              else JobStatus.ANALYZED)
+                                if result.score >= threshold:
+                                    shortlisted += 1
                     score_pct = f"{result.score:.0%}"
                     icon = "⭐" if result.score >= req.min_score else "·"
                     yield f"{icon} #{job_id} {score_pct} — {title[:45]}"
                 except Exception as e:
                     yield f"✗ #{job_id} error: {e}"
+
+            if unenriched:
+                yield (f"→ {unenriched}/{total_kw} jobs have no description yet "
+                       f"(under {MIN_JD_CHARS} chars) — run Enrich, then score again")
 
         yield f"✓ Done — {shortlisted}/{len(job_data)} shortlisted"
     return await sse(gen())
@@ -700,7 +780,7 @@ async def run_check_links(req: CheckLinksRequest):
         from db.models import Job, JobStatus
         from db.session import get_session
 
-        _safe_statuses = {JobStatus.APPLIED, JobStatus.INTERVIEWING, JobStatus.OFFER, JobStatus.REJECTED}
+        from db.models import USER_OWNED_STATUSES
         _ua = (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -760,7 +840,7 @@ async def run_check_links(req: CheckLinksRequest):
                             if req.auto_archive:
                                 with get_session() as session:
                                     job = session.get(Job, job_id)
-                                    if job and job.status not in _safe_statuses:
+                                    if job and job.status not in USER_OWNED_STATUSES:
                                         job.status = JobStatus.ARCHIVED
                             await queue.put(f"✗ #{job_id} {resp.status_code} — {title[:50]} @ {company[:25]}")
                     except (_httpx.TimeoutException, _httpx.ConnectError, _httpx.RemoteProtocolError,
@@ -1091,8 +1171,8 @@ def mark_viewed(job_id: int):
         if not job:
             raise HTTPException(404, "Job not found")
         # Only upgrade status, never downgrade (don't overwrite applied/interview etc.)
-        upgradeable = {JobStatus.NEW, JobStatus.ANALYZED, JobStatus.SHORTLISTED}
-        if job.status in upgradeable:
+        from db.models import PIPELINE_OWNED_STATUSES
+        if job.status in PIPELINE_OWNED_STATUSES:
             job.status = JobStatus.VIEWED
             job.viewed_at = datetime.utcnow()
             session.add(JobEvent(
@@ -1218,17 +1298,31 @@ def get_tracker():
     Return all jobs that have been interacted with (viewed or beyond),
     sorted by last activity, for the tracker board.
     """
+    from sqlalchemy import and_, or_
     from db.session import get_session
     from db.models import Job, JobStatus, Application
+    # VIEWED is excluded on purpose: it is assigned by opening a listing, so it
+    # records browsing rather than a decision and does not belong on a board whose
+    # columns are pipeline stages.
     active_statuses = [
-        JobStatus.VIEWED, JobStatus.CONSIDERING, JobStatus.APPLIED,
+        JobStatus.CONSIDERING, JobStatus.APPLIED,
         JobStatus.INTERVIEWING, JobStatus.OFFER,
         JobStatus.REJECTED,
     ]
     with get_session() as session:
+        # ARCHIVED is included so the board has somewhere to drop a dismissed card,
+        # but only for jobs the user actually handled. Most archived rows are
+        # pipeline rejects that were never opened — 829 against 5 on a real
+        # database — and listing those would bury the column.
         jobs = (
             session.query(Job)
-            .filter(Job.status.in_(active_statuses))
+            .filter(or_(
+                Job.status.in_(active_statuses),
+                and_(Job.status == JobStatus.ARCHIVED,
+                     or_(Job.archived_by_user.is_(True),
+                         Job.viewed_at.isnot(None),
+                         Job.applied_at.isnot(None))),
+            ))
             .order_by(Job.updated_at.desc())
             .all()
         )

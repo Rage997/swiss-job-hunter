@@ -5,6 +5,12 @@ import importlib
 import pytest
 from pydantic_settings import SettingsError
 
+@pytest.fixture(autouse=True)
+def isolate_dotenv(monkeypatch, tmp_path):
+    """A developer's .env must not merge extra keys into the test configuration."""
+    monkeypatch.chdir(tmp_path)
+
+
 
 def load_settings_class(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
