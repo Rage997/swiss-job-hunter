@@ -8,6 +8,7 @@ Two modes:
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass
@@ -314,45 +315,28 @@ Return ONLY valid JSON (no markdown):
     raw, provider = await call_llm(user=user, system=system, max_tokens=1024)
 
     # Strip markdown fences
-    raw = re.sub(r"^```[a-z]*\n?", "", raw.strip())
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
     raw = re.sub(r"\n?```$", "", raw)
 
-    # Extract JSON object even if there's surrounding text
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if not m:
-        return MatchResult(
-            score=0.0, matched_skills=[], missing_skills=[],
-            explanation=f"LLM returned unparseable response: {raw[:100]}",
-            provider=provider,
-        )
-
-    # Clean common JSON issues: smart quotes, unescaped newlines in strings
-    json_str = m.group(0)
-    json_str = json_str.replace('\u201c', '"').replace('\u201d', '"')
-    json_str = json_str.replace('\u2018', "'").replace('\u2019', "'")
-    # Remove literal newlines inside string values
-    json_str = re.sub(r'(?<=:)\s*"([^"]*?)\n([^"]*?)"', 
-                      lambda x: ': "' + x.group(1) + ' ' + x.group(2) + '"', 
-                      json_str)
-
     try:
-        data = json.loads(json_str)
-    except json.JSONDecodeError:
-        # Last resort: extract fields with regex
-        score_m = re.search(r'"score"\s*:\s*([0-9.]+)', json_str)
-        expl_m  = re.search(r'"explanation"\s*:\s*"([^"]{10,})"', json_str)
-        return MatchResult(
-            score=float(score_m.group(1)) if score_m else 0.0,
-            matched_skills=[],
-            missing_skills=[],
-            explanation=expl_m.group(1) if expl_m else "Parse error",
-            provider=provider,
-        )
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("LLM returned malformed scoring JSON; no score saved") from exc
+    if not isinstance(data, dict):
+        raise ValueError("LLM scoring response must be a JSON object")
+    score = data.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score) or not 0 <= score <= 1:
+        raise ValueError("LLM score must be a finite number between 0 and 1")
+    if not isinstance(data.get("explanation"), str) or not data["explanation"].strip():
+        raise ValueError("LLM scoring response needs an explanation")
+    for field in ("matched_skills", "missing_skills"):
+        if not isinstance(data.get(field), list) or any(not isinstance(skill, str) for skill in data[field]):
+            raise ValueError(f"LLM {field} must be a list of strings")
     return MatchResult(
-        score=float(data.get("score", 0.0)),
-        matched_skills=data.get("matched_skills", []),
-        missing_skills=data.get("missing_skills", []),
-        explanation=data.get("explanation", ""),
+        score=float(score),
+        matched_skills=data["matched_skills"],
+        missing_skills=data["missing_skills"],
+        explanation=data["explanation"],
         provider=provider,
     )
 

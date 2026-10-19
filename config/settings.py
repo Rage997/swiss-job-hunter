@@ -109,12 +109,15 @@ class Settings(BaseSettings):
 
     # ── LinkedIn ───────────────────────────────────────────────────────────────
     # Paste the value of the `li_at` cookie from your browser (F12 → Application
-    # → Cookies → linkedin.com). Enables authenticated search (1000+ results).
-    # Leave empty to use the public guest search (~40 results max).
+    # → Cookies → linkedin.com). May unlock more results.
+    # Guest and authenticated searches can be capped or blocked by LinkedIn.
     linkedin_cookie: str = ""
     # Optional HTTP/HTTPS/SOCKS5 proxy, e.g. "http://user:pass@host:port"
     # or "socks5://host:port". Switch this when your IP gets blocked.
     linkedin_proxy: str = ""
+    # Empty means no date or experience restriction.
+    linkedin_time_range: str = ""
+    linkedin_experience_level: str = ""
 
     # ── Email ──────────────────────────────────────────────────────────────────
     smtp_host: str = "smtp.gmail.com"

@@ -23,15 +23,19 @@ console = Console()
 @app.command()
 def search(
     keyword: str = typer.Argument(..., help="Job title / keywords to search"),
-    location: str = typer.Option("Zürich", "--location", "-l", help="City or region"),
+    location: Optional[str] = typer.Option(None, "--location", "-l", help="City or region (default: configured location)"),
     sources: Optional[List[str]] = typer.Option(
         None, "--source", "-s", help="Sources to scrape (default: all)"
     ),
-    max_pages: int = typer.Option(5, "--pages", "-p", help="Max pages per source"),
+    max_pages: Optional[int] = typer.Option(None, "--pages", "-p", min=1, help="Max pages per source (default: configured limit)"),
     no_semantic: bool = typer.Option(False, "--no-semantic", help="Skip semantic dedup"),
 ) -> None:
     """Scrape job listings and store them (with dedup)."""
-    asyncio.run(_search(keyword, location, sources, max_pages, not no_semantic))
+    from config.settings import settings
+    asyncio.run(_search(
+        keyword, settings.default_location if location is None else location,
+        sources, settings.scraper_max_pages if max_pages is None else max_pages, not no_semantic,
+    ))
 
 
 async def _search(
@@ -252,8 +256,13 @@ async def _analyze(limit: int, use_llm: bool, min_score: float, rescore: bool, c
 
         async def score_one(jid: int, title: str, description: str, old_status) -> None:
             nonlocal shortlisted, completed
-            async with sem:
-                result = await llm_score(cv_text, title, description)
+            try:
+                async with sem:
+                    result = await llm_score(cv_text, title, description)
+            except ValueError as exc:
+                completed += 1
+                console.print(f"[red]Job {jid} scoring failed; unchanged: {exc}[/red]")
+                return
             with get_session() as session:
                 j = session.get(Job, jid)
                 if j:
@@ -273,10 +282,14 @@ async def _analyze(limit: int, use_llm: bool, min_score: float, rescore: bool, c
         await _asyncio.gather(*[score_one(jid, t, d, st) for jid, t, d, st in rows])
     else:
         for jid, title, description, _ in rows:
-            if use_llm:
-                result = await llm_score(cv_text, title, description)
-            else:
-                result = fast_score(cv_text, description, compiled=cv_keywords)
+            try:
+                if use_llm:
+                    result = await llm_score(cv_text, title, description)
+                else:
+                    result = fast_score(cv_text, description, compiled=cv_keywords)
+            except ValueError as exc:
+                console.print(f"[red]Job {jid} scoring failed; unchanged: {exc}[/red]")
+                continue
 
             with get_session() as session:
                 j = session.get(Job, jid)

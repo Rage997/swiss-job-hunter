@@ -46,7 +46,7 @@ class EFinancialCareersScraper(BaseScraper):
                     url = (
                         f"{_SEARCH_URL}/{slug}"
                         f"?q={quote_plus(keyword)}{loc_param}"
-                        f"&countryCode=CH&radius=40&radiusUnit=km&pageSize=15"
+                        f"&countryCode=CH&radius={self.radius_km}&radiusUnit=km&pageSize=15"
                         f"&currencyCode=CHF&language=de&enableVectorSearch=true"
                         f"&page={page_num}"
                     )

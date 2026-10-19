@@ -75,3 +75,52 @@ def test_parse_page_returns_multiple_jobs():
     assert jobs[0].source_job_id == "1234567890"
     assert jobs[1].title == "Data Scientist"
     assert jobs[1].source_job_id == "9876543210"
+
+
+@pytest.mark.asyncio
+async def test_short_pages_do_not_skip_vacancies():
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlparse
+
+    scraper = LinkedInRssScraper()
+    ids = [str(1000000000 + n) for n in range(23)]
+
+    async def fetch(url, **kwargs):
+        start = int(parse_qs(urlparse(url).query)["start"][0])
+        return SimpleNamespace(text="".join(
+            _CARD_FULL.replace("1234567890", jid) for jid in ids[start:start + 10]
+        ))
+
+    scraper._fetch = fetch
+    jobs = [job async for job in scraper.scrape("Engineer", "", 5)]
+    assert [job.source_job_id for job in jobs] == ids
+
+
+@pytest.mark.asyncio
+async def test_repeated_pages_do_not_duplicate_results():
+    from types import SimpleNamespace
+    scraper = LinkedInRssScraper()
+
+    async def fetch(url, **kwargs):
+        return SimpleNamespace(text=_PAGE)
+
+    scraper._fetch = fetch
+    jobs = [job async for job in scraper.scrape("Engineer", "", 5)]
+    assert [job.source_job_id for job in jobs] == ["1234567890", "9876543210"]
+
+
+@pytest.mark.asyncio
+async def test_malformed_card_surfaces_partial_search_failure():
+    from types import SimpleNamespace
+    from scrapers.base import ScraperError
+    scraper = LinkedInRssScraper()
+
+    async def fetch(url, **kwargs):
+        return SimpleNamespace(text=_CARD_FULL + _CARD_NO_TITLE)
+
+    scraper._fetch = fetch
+    emitted = []
+    with pytest.raises(ScraperError, match="Unparseable job card"):
+        async for job in scraper.scrape("Engineer", "", 5):
+            emitted.append(job.source_job_id)
+    assert emitted == ["1234567890"]

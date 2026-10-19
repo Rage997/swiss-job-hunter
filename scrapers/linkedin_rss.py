@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from math import ceil
 from typing import AsyncGenerator, Optional, Tuple
 from urllib.parse import quote_plus, urlencode
 
@@ -19,18 +20,15 @@ from scrapers.base import BaseScraper, ScrapedJob
 _GUEST_SEARCH = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 _PAGE_SIZE = 25
 
-LAST_24H = "r86400"
-LAST_7D  = "r604800"
-LAST_30D = "r2592000"
-
 
 class LinkedInRssScraper(BaseScraper):
     source_name = "linkedin.com"
 
-    def __init__(self, time_range: str = LAST_7D, experience_level: str = "3,4") -> None:
+    def __init__(self, time_range: Optional[str] = None, experience_level: Optional[str] = None) -> None:
         super().__init__()
-        self.time_range = time_range
-        self.experience_level = experience_level  # LinkedIn f_E: 2=Entry,3=Associate,4=Senior,5=Director
+        from config.settings import settings
+        self.time_range = settings.linkedin_time_range if time_range is None else time_range
+        self.experience_level = settings.linkedin_experience_level if experience_level is None else experience_level
         # Re-read .env on every instantiation so cookie updates take effect immediately
         from config.settings import Settings
         _fresh = Settings()
@@ -48,14 +46,19 @@ class LinkedInRssScraper(BaseScraper):
             headers["Cookie"] = f"li_at={self._li_at}"
 
         yielded = 0
+        offset = 0
+        seen: set[str] = set()
         for page_num in range(max_pages):
             params = {
                 "keywords": keyword,
                 "location": location or "Switzerland",
-                "f_TPR": self.time_range,
-                "start": page_num * _PAGE_SIZE,
+                "start": offset,
                 "count": _PAGE_SIZE,
             }
+            if self.time_range:
+                params["f_TPR"] = self.time_range
+            if location:
+                params["distance"] = ceil(self.radius_km / 1.609344)
             if self.experience_level:
                 params["f_E"] = self.experience_level
             url = f"{_GUEST_SEARCH}?{urlencode(params)}"
@@ -66,13 +69,26 @@ class LinkedInRssScraper(BaseScraper):
                 self._page_error(page_num + 1, exc, yielded)
                 break
 
-            jobs = self._parse_page(resp.text)
-            if not jobs:
+            # LinkedIn may return ten cards even when count=25. Count raw
+            # cards, not successfully parsed records, to avoid skipping offsets.
+            cards = BeautifulSoup(resp.text, "lxml").select("li")
+            if not cards:
                 break
-
-            for job in jobs:
+            offset += len(cards)
+            fresh = 0
+            for card in cards:
+                job = self._parse_card(card)
+                if job is None:
+                    self._page_error(page_num + 1, ValueError("Unparseable job card"), yielded)
+                key = job.source_job_id or job.url
+                if key in seen:
+                    continue
+                seen.add(key)
+                fresh += 1
                 yielded += 1
                 yield job
+            if fresh == 0:
+                break
 
     def _parse_page(self, html: str) -> list[ScrapedJob]:
         soup = BeautifulSoup(html, "lxml")

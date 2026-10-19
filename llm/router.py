@@ -171,15 +171,10 @@ async def _call_ollama(system: str, user: str, max_tokens: int) -> str:
 
 
 async def _call_llama_cpp(system: str, user: str, max_tokens: int) -> str:
-    # llama.cpp ignores OpenAI's `reasoning_effort`; thinking models (e.g. Qwen3)
-    # toggle chain-of-thought via the /no_think token instead. Thinking is on by
-    # default, so only append the token when the user has disabled it.
-    if not settings.llama_cpp_think:
-        user = f"{user}\n/no_think"
     return await _openai_chat(
         api_key="llama_cpp", base_url=settings.llama_cpp_base_url,
         model=settings.llama_cpp_model, max_tokens=max_tokens,
-        system=system, user=user,
+        system=system, user=user, think=settings.llama_cpp_think,
     )
 
 

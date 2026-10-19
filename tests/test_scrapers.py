@@ -284,10 +284,11 @@ def test_page_error_raises_when_the_source_produced_nothing():
         _scraper()._page_error(page=1, exc=RuntimeError("410 Gone"), yielded=0)
 
 
-def test_page_error_only_logs_once_some_jobs_are_through(capsys):
-    """A later page failing is a truncated run — keep what we have."""
-    _scraper()._page_error(page=4, exc=RuntimeError("timeout"), yielded=60)
-    assert "after 60 jobs" in capsys.readouterr().out
+def test_page_error_surfaces_incomplete_search():
+    from scrapers.base import ScraperError
+
+    with pytest.raises(ScraperError, match="page 4 failed after 60 jobs"):
+        _scraper()._page_error(page=4, exc=RuntimeError("timeout"), yielded=60)
 
 
 @pytest.mark.asyncio

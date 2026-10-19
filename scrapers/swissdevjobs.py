@@ -1,39 +1,51 @@
-"""
-Scraper for SwissDevJobs.ch — niche IT/software jobs in Switzerland.
-Uses Playwright (SPA, JS-rendered content).
-"""
+"""SwissDevJobs public inventory and full-description APIs."""
 from __future__ import annotations
 
+import json
+import unicodedata
+from datetime import datetime
 from typing import AsyncGenerator, Optional
-from urllib.parse import urlencode
+from urllib.parse import quote
 
-from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
 
-from config.settings import settings
-from scrapers.base import BaseScraper, ScrapedJob
+from scrapers.base import BaseScraper, ScrapedJob, ScraperError
 
 _BASE_URL = "https://swissdevjobs.ch"
 
-_JOB_KEYWORDS = {
-    "senior", "junior", "lead", "head", "principal", "staff",
-    "engineer", "developer", "manager", "consultant", "analyst",
-    "scientist", "researcher", "architect", "director", "specialist",
-    "administrator", "designer", "devops", "cloud", "data", "ai",
-    "ml", "software", "platform", "security", "forward", "deployed",
-}
+
+def _normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text.casefold())
+    return "".join(c for c in text if not unicodedata.combining(c))
 
 
-def _extract_company_from_slug(slug: str) -> str:
-    """Extract company name from URL slug like 'CONVOTIS-Schweiz-AG-Senior-Engineer'"""
-    parts = slug.split("-")
-    company_parts = []
-    for part in parts:
-        if not part:
-            continue  # skip empty parts from double dashes
-        if part.lower() in _JOB_KEYWORDS:
-            break
-        company_parts.append(part)
-    return " ".join(company_parts) if company_parts else "Unknown"
+def _location_key(text: str) -> str:
+    return _normalize(text).replace("zuerich", "zurich")
+
+
+def _description(data: object, slug: str) -> Optional[str]:
+    if not isinstance(data, dict) or data.get("jobUrl") != slug:
+        raise ValueError("Missing or mismatched job detail payload")
+    if data.get("isDisabledOrOutdated") is True or data.get("isPaused") is True:
+        return None
+    sections = []
+    for field, heading in (
+        ("requirementsMustTextArea", "Requirements"),
+        ("requirementsNiceTextArea", "Nice to have"),
+        ("responsibilitiesTextArea", "Responsibilities"),
+        ("description", "About the role and company"),
+    ):
+        value = data.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"Invalid detail section: {field}")
+        text = BeautifulSoup(value, "html.parser").get_text("\n").strip()
+        if text:
+            sections.append(f"{heading}\n{text}")
+    if not sections:
+        raise ValueError("Job detail contains no description sections")
+    return "\n\n".join(sections)
 
 
 class SwissDevJobsScraper(BaseScraper):
@@ -42,133 +54,96 @@ class SwissDevJobsScraper(BaseScraper):
     async def scrape(
         self, keyword: str, location: str = "Zürich", max_pages: int = 5
     ) -> AsyncGenerator[ScrapedJob, None]:
-        params: dict = {"position": keyword}
-        if location:
-            params["city"] = location
-        search_url = f"{_BASE_URL}/jobs?{urlencode(params)}"
-
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=settings.playwright_headless)
-            context = await browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                )
-            )
-            page = await context.new_page()
-
-            yielded = 0
-            try:
-                await page.goto(search_url, wait_until="networkidle", timeout=30_000)
-                await page.wait_for_timeout(1000)
-
-                cards = await page.query_selector_all("div[data-test='card-body']")
-                if not cards:
-                    cards = await page.query_selector_all("div[class*='card']")
-
-                for card in cards:
-                    job = await self._parse_card(card)
-                    if job:
-                        yielded += 1
-                        yield job
-
-            except Exception as exc:
-                self._page_error(1, exc, yielded)
-            finally:
-                await browser.close()
-
-    async def _parse_card(self, card) -> Optional[ScrapedJob]:
+        if max_pages <= 0:
+            return
         try:
-            link_el = await card.query_selector("a[title][href]")
-            if not link_el:
-                return None
-
-            href = await link_el.get_attribute("href") or ""
-
-            # Skip company ads — only real job listings start with /jobs/
-            if not href.startswith("/jobs/"):
-                return None
-
-            slug = href.replace("/jobs/", "")
-            url = f"{_BASE_URL}{href}"
-
-            # Title from link title attribute: "Job Title job in City"
-            raw_title = await link_el.get_attribute("title") or ""
-            title = raw_title.split(" job in ")[0].strip() if " job in " in raw_title else raw_title.strip()
-
-            # Location from title suffix
-            location = "Switzerland"
-            if " job in " in raw_title:
-                location = raw_title.split(" job in ")[-1].strip()
-
-            # Company from URL slug
-            company = _extract_company_from_slug(slug)
-
-            # Salary
-            salary_raw = None
-            for sel in ["span[class*='salary']", "div[class*='salary']"]:
-                salary_el = await card.query_selector(sel)
-                if salary_el:
-                    text = (await salary_el.inner_text()).strip()
-                    if text:
-                        salary_raw = text
-                        break
-
-            description = ""  # filled by Enrich step
-
-            if not title:
-                return None
-
-            return ScrapedJob(
-                title=title,
-                company=company,
-                location=location,
-                description=description,
-                url=url,
-                source=self.source_name,
-                source_job_id=slug,
-                salary_raw=salary_raw,
-            )
+            response = await self._fetch(f"{_BASE_URL}/api/jobsLight")
+            rows = response.json()
+            # This is the complete, unpaginated inventory used by the website.
+            # An empty inventory is not evidence of a legitimate empty search.
+            if not isinstance(rows, list) or not rows:
+                raise ValueError("Expected a nonempty job inventory")
+            jobs = []
+            seen = set()
+            terms = _normalize(keyword).split()
+            city = _location_key(location.strip())
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("Invalid job inventory record")
+                if row.get("isPaused") is True or row.get("isDisabledOrOutdated") is True:
+                    continue
+                for field in ("jobUrl", "name", "company"):
+                    if not isinstance(row.get(field), str) or not row[field].strip():
+                        raise ValueError(f"Job inventory record missing {field}")
+                slug = row["jobUrl"]
+                if "/" in slug:
+                    raise ValueError(f"Invalid job slug: {slug}")
+                places = [row.get("actualCity"), row.get("cityCategory")]
+                if any(p is not None and not isinstance(p, str) for p in places):
+                    raise ValueError(f"Invalid location for {slug}")
+                places = [p.strip() for p in places if p and p.strip()]
+                if not places:
+                    raise ValueError(f"Missing location for {slug}")
+                tags = []
+                for field in ("technologies", "filterTags"):
+                    values = row.get(field, [])
+                    if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                        raise ValueError(f"Invalid {field} for {slug}")
+                    tags.extend(values)
+                category = row.get("techCategory", "")
+                if not isinstance(category, str):
+                    raise ValueError(f"Invalid technology category for {slug}")
+                searchable = _normalize(" ".join([row["name"], row["company"], category, *tags]))
+                if not all(term in searchable for term in terms):
+                    continue
+                if city and not any(city in _location_key(p) for p in places):
+                    continue
+                if slug in seen:
+                    continue
+                seen.add(slug)
+                posted_at = None
+                if row.get("activeFrom"):
+                    posted_at = datetime.fromisoformat(row["activeFrom"])
+                low, high = row.get("annualSalaryFrom"), row.get("annualSalaryTo")
+                salary = None
+                if low is not None and high is not None:
+                    salary = f"CHF {low:,}–{high:,} / year"
+                jobs.append(ScrapedJob(
+                    title=row["name"].strip(),
+                    company=row["company"].strip(),
+                    location=places[0],
+                    description="",  # Enrichment loads the full requirements, not just tags.
+                    url=f"{_BASE_URL}/jobs/{quote(slug, safe='')}",
+                    source=self.source_name,
+                    source_job_id=slug,
+                    salary_raw=salary,
+                    employment_type=row.get("jobType"),
+                    remote_ok=row.get("workplace") in {"remote", "hybrid"},
+                    language_required=row.get("language"),
+                    posted_at=posted_at,
+                    raw_json=json.dumps(row, ensure_ascii=False),
+                ))
+            # Validate the entire response before emitting jobs: a changed schema
+            # must be reported as a source failure, never as a successful partial run.
+            for job in jobs:
+                yield job
         except Exception as exc:
-            print(f"[swissdevjobs] parse error: {exc}")
-            return None
+            raise ScraperError(f"{self.source_name}: {exc}") from exc
 
     async def fetch_full_description(self, source_job_id: str) -> Optional[tuple]:
-        """Fetch full JD from the job detail page using Playwright (SPA)."""
-        url = f"{_BASE_URL}/jobs/{source_job_id}"
+        """None means unavailable; () means explicitly expired (safe to archive)."""
+        url = f"{_BASE_URL}/jobs/{quote(source_job_id, safe='')}"
         try:
-            await self._polite_delay()
-            async with async_playwright() as pw:
-                browser = await pw.chromium.launch(headless=settings.playwright_headless)
-                context = await browser.new_context(
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/124.0.0.0 Safari/537.36"
-                    )
-                )
-                page = await context.new_page()
-                try:
-                    resp = await page.goto(url, wait_until="networkidle", timeout=30_000)
-                    if resp and resp.status == 404:
-                        return ()
-                    await page.wait_for_timeout(1000)
-                    for sel in [
-                        "[class*='job-description']",
-                        "[class*='description']",
-                        "[class*='content']",
-                        "article",
-                        "main",
-                    ]:
-                        el = await page.query_selector(sel)
-                        if el:
-                            text = (await el.inner_text()).strip()
-                            if len(text) > 200:
-                                return text, url
-                    return None
-                finally:
-                    await browser.close()
+            response = await self._fetch(
+                f"{_BASE_URL}/api/jobWithUrl/{quote(source_job_id, safe='')}",
+                allow_status={404, 410},
+            )
+            if response.status_code in {404, 410}:
+                return ()
+            text = _description(response.json(), source_job_id)
+            if text is None:
+                return ()
+            return text, url
         except Exception as exc:
             print(f"[swissdevjobs] detail fetch error: {exc}")
             return None

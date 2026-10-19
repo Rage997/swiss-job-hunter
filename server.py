@@ -18,12 +18,13 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 
-from config.settings import settings
+from config.settings import Settings, settings
 
 app = FastAPI(title="Swiss Job Hunter API")
+RADIUS_NOTE = "Radius applies to LinkedIn/eFinancialCareers. Other boards use their native city/region area; JobScout24 uses 20 km. ALL CH ignores radius."
 
 app.add_middleware(
     CORSMiddleware,
@@ -55,6 +56,11 @@ def get_config():
         "default_keyword": s.default_keyword,
         "default_location": s.default_location,
         "keyword_presets": s.keyword_presets,
+        "scraper_max_pages": s.scraper_max_pages,
+        "search_radius_km": s.search_radius_km,
+        "radius_note": RADIUS_NOTE,
+        "linkedin_time_range": s.linkedin_time_range,
+        "linkedin_experience_level": s.linkedin_experience_level,
     }
 
 
@@ -108,7 +114,7 @@ def get_jobs_query(status: str = "all", q: str = "", direction: str = "all", min
                 "user_stars": j.user_stars,
                 "direction": j.direction,
                 "posted_at": j.posted_at.isoformat() if j.posted_at else None,
-                "scraped_at": j.scraped_at.isoformat() if j.scraped_at else None,
+                "scraped_at": (j.scraped_at.isoformat() + ("Z" if j.scraped_at.tzinfo is None else "")) if j.scraped_at else None,
             }
             for j in jobs
         ]
@@ -260,15 +266,16 @@ async def sse(gen: AsyncGenerator[str, None]) -> StreamingResponse:
 
 
 class SearchRequest(BaseModel):
-    keyword: str = "ML engineer"
+    keyword: str = Field(default_factory=lambda: Settings().default_keyword)
     keywords: list[str] = []  # if non-empty, overrides keyword; each is searched in turn
-    location: str = "Zürich"
+    location: str = Field(default_factory=lambda: Settings().default_location)
     sources: list[str] = ["jobs.ch"]
-    pages: int = 3
+    pages: int = Field(default_factory=lambda: Settings().scraper_max_pages, ge=1)
+    radius_km: int = Field(default_factory=lambda: Settings().search_radius_km, ge=1)
     semantic: bool = False
     direction: Optional[str] = None
-    linkedin_time_range: str = "r604800"  # r86400=24h | r604800=7d | r2592000=30d
-    linkedin_experience_level: str = "3,4"  # 2=Entry,3=Associate,4=Senior,5=Director
+    linkedin_time_range: str = Field(default_factory=lambda: Settings().linkedin_time_range)
+    linkedin_experience_level: str = Field(default_factory=lambda: Settings().linkedin_experience_level)
 
 
 @app.post("/run/search")
@@ -288,6 +295,11 @@ async def run_search(req: SearchRequest):
             yield "✗ No sources selected"
             return
         total_new = 0
+        yield f"Search: {len(kw_list)} keywords, {req.pages} pages/source, location={req.location or 'all Switzerland'}, radius={req.radius_km} km"
+        if req.location:
+            yield RADIUS_NOTE
+        if "linkedin.com" in req.sources:
+            yield f"LinkedIn: dates={req.linkedin_time_range or 'any time'}, experience={req.linkedin_experience_level or 'all levels'}"
         linkedin_in_sources = "linkedin.com" in req.sources
 
         async def scrape_source(kw: str, source_name: str, queue: asyncio.Queue) -> int:
@@ -304,6 +316,7 @@ async def run_search(req: SearchRequest):
                     kwargs["time_range"] = req.linkedin_time_range
                     kwargs["experience_level"] = req.linkedin_experience_level
                 async with scraper_cls(**kwargs) as scraper:
+                    scraper.radius_km = req.radius_km
                     async for scraped in scraper.scrape(kw, req.location, req.pages):
                         found_count += 1
                         if found_count % 10 == 0:
@@ -666,7 +679,7 @@ async def run_analyze(req: AnalyzeRequest):
 
                         # Keyword pre-filter: skip LLM if clearly irrelevant
                         kw_result = fast_score(cv_text, description or "", compiled=cv_keywords)
-                        if kw_result.score < req.min_keyword_score:
+                        if kw_result.missing_skills and kw_result.score < req.min_keyword_score:
                             with get_session() as session:
                                 job = session.get(Job, job_id)
                                 if job:

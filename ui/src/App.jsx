@@ -49,7 +49,6 @@ const EVENT_META = {
 
 const SOURCES = ["jobs.ch","jobscout24.ch","swissdevjobs.ch","jobup.ch","züri.jobs","efinancialcareers.ch","linkedin.com","michael-page.ch"];
 
-const DIRECTIONS_FALLBACK = ["agent", "perception"];
 
 const APPLY_METHODS = [
   { id: "email",    label: "Email",    icon: "📧" },
@@ -539,6 +538,15 @@ function TrackerBoard({ onSelectJob, onChanged, onChangeFailed }) {
 // ── Main app ──────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const [savedSearch] = useState(() => {
+    try {
+      const value = JSON.parse(localStorage.getItem("sjh-search") || "{}");
+      return value && typeof value === "object" ? value : {};
+    } catch { return {}; }
+  });
+  const [searchReady, setSearchReady] = useState(false);
+  const [searchConfigError, setSearchConfigError] = useState("");
+  const [radiusNote, setRadiusNote] = useState("");
   const [jobs, setJobs] = useState([]);
   const [stats, setStats] = useState({});
   const [selected, setSelected] = useState(null);
@@ -552,9 +560,9 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [loading, setLoading] = useState({});
   const pipelineRunning = useRef(false);
-  const [searchKws, setSearchKws] = useState(["Agent"]);
+  const [searchKws, setSearchKws] = useState([]);
   const [searchKwInput, setSearchKwInput] = useState("");
-  const [searchLoc, setSearchLoc] = useState("Zürich");
+  const [searchLoc, setSearchLoc] = useState("");
   const [searchSrc, setSearchSrc] = useState(SOURCES);
   // "active" is a client-side pseudo-status meaning everything except archived.
   // The default used to be "all", which includes archived — so the board opened
@@ -573,13 +581,15 @@ export default function App() {
   // PURGE to delete everything below that score.
   const [minMatch, setMinMatch] = useState(0);        // view filter only, never sent
   const [opsThreshold, setOpsThreshold] = useState(10); // sent to destructive endpoints
-  const [sortBy, setSortBy] = useState("posted");     // posted | score | company
-  const [searchPages, setSearchPages] = useState(3);
+  const [sortBy, setSortBy] = useState("discovered"); // discovered | posted | score | company
+  const [showUnscored, setShowUnscored] = useState(true);
+  const [searchPages, setSearchPages] = useState(1);
+  const [searchRadius, setSearchRadius] = useState(1);
   const [keywordPresets, setKeywordPresets] = useState({});
-  const [linkedinTimeRange, setLinkedinTimeRange] = useState("r604800");
-  const [linkedinExpLevel, setLinkedinExpLevel] = useState("3,4");
+  const [linkedinTimeRange, setLinkedinTimeRange] = useState("");
+  const [linkedinExpLevel, setLinkedinExpLevel] = useState("");
   const [direction, setDirection] = useState("all");
-  const [directions, setDirections] = useState(DIRECTIONS_FALLBACK);
+  const [directions, setDirections] = useState([]);
   const [mainTab, setMainTab] = useState("board");   // board | tracker
   const [rightTab, setRightTab] = useState("detail"); // detail | company | timeline | apply | tailor
   const [applyModal, setApplyModal] = useState(false);
@@ -640,21 +650,41 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch(`${API}/config`).then(r=>r.ok?r.json():null).then(cfg=>{
-      if (!cfg) return;
-      setSearchKws([cfg.default_keyword || "Agent"]);
-      setSearchLoc(cfg.default_location || "Zürich");
-      if (cfg.keyword_presets && typeof cfg.keyword_presets === "object") {
-        setKeywordPresets(cfg.keyword_presets);
-      }
-    }).catch(()=>{});
-    fetch(`${API}/presets`).then(r=>r.ok?r.json():null).then(presets=>{
-      if (presets && typeof presets === "object") setKeywordPresets(presets);
-    }).catch(()=>{});
-    fetch(`${API}/directions`).then(r=>r.ok?r.json():null).then(dirs=>{
-      if (dirs && dirs.length) setDirections(dirs);
+    fetch(`${API}/config`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    }).then(cfg => {
+      const saved = savedSearch;
+      setSearchKws(Array.isArray(saved.keywords) && saved.keywords.every(k => typeof k === "string")
+        ? saved.keywords : [cfg.default_keyword]);
+      setSearchKwInput(typeof saved.draft === "string" ? saved.draft : "");
+      setSearchLoc(typeof saved.location === "string" ? saved.location : cfg.default_location);
+      setSearchSrc(Array.isArray(saved.sources) ? saved.sources.filter(s => SOURCES.includes(s)) : SOURCES);
+      setSearchPages(Number.isInteger(saved.pages) && saved.pages > 0 ? saved.pages : cfg.scraper_max_pages);
+      setSearchRadius(Number.isInteger(saved.radius) && saved.radius > 0 ? saved.radius : cfg.search_radius_km);
+      setLinkedinTimeRange(typeof saved.timeRange === "string" ? saved.timeRange : cfg.linkedin_time_range);
+      setLinkedinExpLevel(typeof saved.experience === "string" ? saved.experience : cfg.linkedin_experience_level);
+      setRadiusNote(cfg.radius_note);
+      setKeywordPresets(cfg.keyword_presets || {});
+      setSearchReady(true);
+    }).catch(e => setSearchConfigError(`Search settings unavailable: ${e.message}. Reload to retry.`));
+    fetch(`${API}/directions`).then(r=>r.ok?r.json():[]).then(dirs=>{
+      setDirections(dirs);
+      setDirection(dirs.includes(savedSearch.direction) ? savedSearch.direction : "all");
     }).catch(()=>{});
   }, []);
+
+  useEffect(() => {
+    if (!searchReady) return;
+    try {
+      localStorage.setItem("sjh-search", JSON.stringify({
+        keywords:searchKws, draft:searchKwInput, location:searchLoc, sources:searchSrc,
+        pages:searchPages, radius:searchRadius, timeRange:linkedinTimeRange,
+        experience:linkedinExpLevel, direction,
+      }));
+    } catch { /* Storage may be disabled in private browsing. */ }
+  }, [searchReady, searchKws, searchKwInput, searchLoc, searchSrc, searchPages,
+      searchRadius, linkedinTimeRange, linkedinExpLevel, direction]);
 
   const translateDesc = async (job, target) => {
     setTranslating(true);
@@ -724,11 +754,13 @@ export default function App() {
       if (!r.ok) {
         const err = await r.text();
         addLog(`✗ ${key} error: ${r.status} ${err.slice(0,100)}`);
-        return;
+        return false;
       }
       const reader = r.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
+      let failed = false;
+      let completed = false;
       while (true) {
         const {done,value} = await reader.read();
         if (done) break;
@@ -738,13 +770,21 @@ export default function App() {
         lines.forEach(line => {
           if (line.startsWith("data: ")) {
             const msg = line.slice(6).trim();
-            if (msg && msg !== "[DONE]") addLog(msg);
+            if (msg === "[DONE]") completed = true;
+            else if (msg) {
+              addLog(msg);
+              // A genuine low score is not an execution failure.
+              if (/^\u2717/.test(msg) && !/^\u2717 #\d+ \d+%/.test(msg)) failed = true;
+            }
           }
         });
       }
-      addLog(`✓ ${key} done`);
+      const ok = completed && !failed;
+      addLog(`${key} ${ok ? "done" : "incomplete or failed — see log"}`);
+      return ok;
     }).catch(e => {
       addLog(`✗ ${key} failed: ${e.message}`);
+      return false;
     }).finally(() => {
       setLoading(p=>({...p,[key]:false}));
       fetchJobs(); fetchStats();
@@ -752,6 +792,7 @@ export default function App() {
   }, [addLog, fetchJobs, fetchStats]);
 
   const runPipeline = useCallback(async () => {
+    if (!searchReady || !searchSrc.length) return;
     if (pipelineRunning.current) { addLog("✗ Pipeline already running"); return; }
     const kws = searchKwInput.trim() ? [...searchKws, searchKwInput.trim()] : searchKws;
     if (!kws.length) { addLog("✗ No keywords set"); return; }
@@ -763,19 +804,20 @@ export default function App() {
     setLoading(p=>({...p, pipeline:true}));
     addLog("━━━ PIPELINE START ━━━");
     try {
-      await runStream("run/search", {keywords:kws, keyword:kws[0]||"", location:searchLoc, sources:searchSrc, pages:searchPages, semantic:false, direction:dir, linkedin_time_range:linkedinTimeRange, linkedin_experience_level:linkedinExpLevel}, "search");
-      for (const src of (enrichSources.length ? enrichSources : [searchSrc[0]||"jobs.ch"])) {
-        await runStream("run/enrich", {limit:9999, source:src, rescore_llm:false, direction:dir}, `enrich-${src}`);
+      let ok = await runStream("run/search", {keywords:kws, keyword:kws[0]||"", location:searchLoc, sources:searchSrc, pages:searchPages, radius_km:searchRadius, semantic:false, direction:dir, linkedin_time_range:linkedinTimeRange, linkedin_experience_level:linkedinExpLevel}, "search");
+      for (const src of enrichSources) {
+        ok = (await runStream("run/enrich", {limit:9999, source:src, rescore_llm:false, direction:dir}, `enrich-${src}`)) && ok;
       }
-      await runStream("run/analyze", {limit:9999, llm:true, archive_below:opsThreshold/100, direction:dir}, "analyze-llm");
-      addLog("━━━ PIPELINE DONE ━━━");
+      ok = (await runStream("run/analyze", {limit:9999, llm:true, archive_below:opsThreshold/100, direction:dir}, "analyze-llm")) && ok;
+      addLog(ok ? "PIPELINE DONE" : "PIPELINE FINISHED WITH ERRORS — see log");
     } finally {
       pipelineRunning.current = false;
       setLoading(p=>({...p, pipeline:false}));
     }
-  }, [searchKws, searchKwInput, searchSrc, searchLoc, searchPages, direction, linkedinTimeRange, linkedinExpLevel, opsThreshold, runStream, addLog]);
+  }, [searchReady, searchKws, searchKwInput, searchSrc, searchLoc, searchPages, searchRadius, direction, linkedinTimeRange, linkedinExpLevel, opsThreshold, runStream, addLog]);
 
   const runPipelineKeyword = useCallback(async () => {
+    if (!searchReady || !searchSrc.length) return;
     if (pipelineRunning.current) { addLog("✗ Pipeline already running"); return; }
     const kws = searchKwInput.trim() ? [...searchKws, searchKwInput.trim()] : searchKws;
     if (!kws.length) { addLog("✗ No keywords set"); return; }
@@ -787,17 +829,17 @@ export default function App() {
     setLoading(p=>({...p, pipelineKw:true}));
     addLog("━━━ PIPELINE START (keyword) ━━━");
     try {
-      await runStream("run/search", {keywords:kws, keyword:kws[0]||"", location:searchLoc, sources:searchSrc, pages:searchPages, semantic:false, direction:dir, linkedin_time_range:linkedinTimeRange, linkedin_experience_level:linkedinExpLevel}, "search");
-      for (const src of (enrichSources.length ? enrichSources : [searchSrc[0]||"jobs.ch"])) {
-        await runStream("run/enrich", {limit:9999, source:src, rescore_llm:false, direction:dir}, `enrich-${src}`);
+      let ok = await runStream("run/search", {keywords:kws, keyword:kws[0]||"", location:searchLoc, sources:searchSrc, pages:searchPages, radius_km:searchRadius, semantic:false, direction:dir, linkedin_time_range:linkedinTimeRange, linkedin_experience_level:linkedinExpLevel}, "search");
+      for (const src of enrichSources) {
+        ok = (await runStream("run/enrich", {limit:9999, source:src, rescore_llm:false, direction:dir}, `enrich-${src}`)) && ok;
       }
-      await runStream("run/analyze", {limit:9999, llm:false, direction:dir}, "analyze-kw");
-      addLog("━━━ PIPELINE DONE ━━━");
+      ok = (await runStream("run/analyze", {limit:9999, llm:false, direction:dir}, "analyze-kw")) && ok;
+      addLog(ok ? "PIPELINE DONE" : "PIPELINE FINISHED WITH ERRORS — see log");
     } finally {
       pipelineRunning.current = false;
       setLoading(p=>({...p, pipelineKw:false}));
     }
-  }, [searchKws, searchKwInput, searchSrc, searchLoc, searchPages, direction, linkedinTimeRange, linkedinExpLevel, runStream, addLog]);
+  }, [searchReady, searchKws, searchKwInput, searchSrc, searchLoc, searchPages, searchRadius, direction, linkedinTimeRange, linkedinExpLevel, runStream, addLog]);
 
   const generateCover = async (job) => {
     setLoading(p=>({...p,cover:true}));
@@ -848,31 +890,40 @@ export default function App() {
   const visible = jobs.filter(j=>
     (filterStatus==="all"
       || (filterStatus==="active" ? j.status!=="archived" : j.status===filterStatus)) &&
-    (minMatch===0 || (j.match_score!=null && j.match_score*100 >= minMatch))
+    (j.match_score == null
+      ? (j.status === "archived" ? minMatch === 0 : showUnscored)
+      : j.match_score * 100 >= minMatch)
   );
 
-  // Date bucketing is now one sort mode among three. Grouping by posted date and
-  // only sorting by score *within* a bucket meant a 25% job posted today sat above
-  // a 93% job posted yesterday, with no way to see the best matches first.
   const byScore = (a,b) => (b.match_score ?? -1) - (a.match_score ?? -1);
-
-  const visibleGroups = sortBy === "posted"
+  const unscored = visible.filter(j => j.match_score == null && j.status !== "archived");
+  const scored = visible.filter(j => j.match_score != null || j.status === "archived");
+  const dateField = sortBy === "discovered" ? "scraped_at" : "posted_at";
+  const scoredGroups = sortBy === "posted" || sortBy === "discovered"
     ? POSTED_BUCKETS
         .map(b => ({
           ...b,
-          jobs: visible.filter(j => postedBucket(j.posted_at) === b.key).sort(byScore),
+          label: `${sortBy === "discovered" ? "Discovered" : "Published"} · ${b.label}`,
+          jobs: scored.filter(j => postedBucket(j[dateField]) === b.key).sort(byScore),
         }))
         .filter(g => g.jobs.length > 0)
     : [{
         key: sortBy,
         label: sortBy === "score" ? "Best match first" : "By company",
         color: "#8a8278",
-        jobs: [...visible].sort(
+        jobs: [...scored].sort(
           sortBy === "score"
             ? byScore
             : (a,b) => (a.company||"").localeCompare(b.company||"") || byScore(a,b)
         ),
       }].filter(g => g.jobs.length > 0);
+  const visibleGroups = [
+    ...(unscored.length ? [{
+      key:"unscored", label:"Not scored", color:"#a87c2e",
+      jobs:[...unscored].sort((a,b) => (b.scraped_at || "").localeCompare(a.scraped_at || "")),
+    }] : []),
+    ...scoredGroups,
+  ];
 
   const Tab = ({id,label,active,onClick}) => (
     <button onClick={onClick} style={{
@@ -991,12 +1042,21 @@ export default function App() {
                   </div>
                   <div style={{display:"flex",gap:3,marginBottom:4}}>
                     {Object.entries(keywordPresets).map(([dir, kws])=>(
-                      <button key={dir} onClick={()=>{ setSearchKws(kws); setSearchKwInput(""); setDirection(dir); }} style={{
+                      <button key={dir} onClick={()=>{ setSearchKws(kws); setSearchKwInput(""); }} style={{
                         flex:1,fontSize:8,padding:"3px 0",borderRadius:3,border:"1px solid #4d7ab540",
                         background:"#4d7ab510",color:"#4d7ab5",cursor:"pointer",
                         fontFamily:"monospace",fontWeight:700,letterSpacing:"0.04em",
                       }}>⚡ {dir.toUpperCase()}</button>
                     ))}
+                  </div>
+                  {Object.keys(keywordPresets).length > 0 && <button
+                    onClick={()=>{ setSearchKws([...new Set(Object.values(keywordPresets).flat())]); setSearchKwInput(""); }}
+                    style={{...inp,fontSize:9,cursor:"pointer",marginBottom:4}}>
+                    USE ALL KEYWORD PRESETS
+                  </button>}
+                  <div style={{fontSize:9,color:"#7a7268",marginBottom:5}}>
+                    {searchReady ? `${searchKws.length + (searchKwInput.trim() ? 1 : 0)} keywords · ${searchSrc.length} sources · up to ${searchPages} pages each` : "Loading search settings…"}
+                    {searchConfigError && <div role="alert">{searchConfigError}</div>}
                   </div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:3}}>
                     {searchKws.map((kw,i)=>(
@@ -1044,10 +1104,17 @@ export default function App() {
                       color:searchLoc===""?"#4d7ab5":"#8a8278",
                       fontSize:9,fontWeight:700,fontFamily:"monospace",cursor:"pointer",whiteSpace:"nowrap",
                     }}>ALL CH</button>
-                    <input type="number" min={1} max={40} value={searchPages}
+                    <input type="number" min={1} value={searchPages}
                       onChange={e=>setSearchPages(Math.max(1,parseInt(e.target.value)||1))}
                       title="pages per source" style={{...inp,width:64,textAlign:"center"}}/>
                   </div>
+                  <label style={{display:"flex",gap:5,alignItems:"center",fontSize:9,color:"#7a7268",marginBottom:4}}>
+                    RADIUS (km)
+                    <input aria-label="Search radius in km" type="number" min={1} value={searchRadius}
+                      disabled={!searchLoc} onChange={e=>setSearchRadius(Math.max(1,parseInt(e.target.value)||1))}
+                      style={{...inp,width:64,textAlign:"center"}}/>
+                  </label>
+                  <div style={{fontSize:9,color:"#7a7268",marginBottom:5}}>{radiusNote}</div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:3,marginBottom:5}}>
                     <button onClick={()=>setSearchSrc(searchSrc.length===SOURCES.length?[]:SOURCES)} style={{
                       fontSize:8,padding:"2px 6px",borderRadius:3,border:"1px solid",
@@ -1069,12 +1136,14 @@ export default function App() {
                   {searchSrc.includes("linkedin.com") && (<>
                     <select value={linkedinTimeRange} onChange={e=>setLinkedinTimeRange(e.target.value)}
                       style={{...inp,marginBottom:0,fontSize:9,color:"#5e5850"}}>
+                      <option value="">LinkedIn · Any time</option>
                       <option value="r86400">LinkedIn · 24h</option>
                       <option value="r604800">LinkedIn · 7 days</option>
                       <option value="r2592000">LinkedIn · 30 days</option>
                     </select>
                     <select value={linkedinExpLevel} onChange={e=>setLinkedinExpLevel(e.target.value)}
                       style={{...inp,marginBottom:0,fontSize:9,color:"#5e5850"}}>
+                      <option value="">LinkedIn · All experience levels</option>
                       <option value="2,3,4">LinkedIn · Entry–Senior</option>
                       <option value="3,4">LinkedIn · Associate–Senior</option>
                       <option value="4">LinkedIn · Senior only</option>
@@ -1084,11 +1153,11 @@ export default function App() {
                   <div style={{display:"flex",flexDirection:"column",gap:8}}>
                     <Btn onClick={runPipelineKeyword}
                       loading={loading.pipelineKw}
-                      disabled={loading.pipelineKw||loading.pipeline||loading.search||loading.analyze||Object.keys(loading).some(k=>k.startsWith("enrich")&&loading[k])}
+                      disabled={!searchReady||!searchSrc.length||loading.pipelineKw||loading.pipeline||loading.search||loading.analyze||Object.keys(loading).some(k=>k.startsWith("enrich")&&loading[k])}
                       label="SEARCH + SCORE (KEYWORD)" icon="⚡" color="#a87c2e"/>
                     <Btn onClick={runPipeline}
                       loading={loading.pipeline}
-                      disabled={loading.pipelineKw||loading.pipeline||loading.search||loading["analyze-llm"]||Object.keys(loading).some(k=>k.startsWith("enrich")&&loading[k])}
+                      disabled={!searchReady||!searchSrc.length||loading.pipelineKw||loading.pipeline||loading.search||loading["analyze-llm"]||Object.keys(loading).some(k=>k.startsWith("enrich")&&loading[k])}
                       label="SEARCH + SCORE (KEYWORD + LLM)" icon="⚡" color="#9070c8"/>
                     <Btn onClick={()=>runStream("run/check-links",{auto_archive:true,concurrency:10,min_score:opsThreshold/100},"check-links")}
                       loading={loading["check-links"]} label="CHECK DEAD LINKS" icon="🔗"
@@ -1189,11 +1258,16 @@ export default function App() {
                       <span style={{fontSize:9,color:"#a8a098",fontFamily:"monospace"}}>%</span>
                     </div>
                   </div>
+                  <label style={{display:"flex",gap:4,alignItems:"center",fontSize:9,color:"#7a7268",marginBottom:5}}>
+                    <input type="checkbox" checked={showUnscored} onChange={e=>setShowUnscored(e.target.checked)}/>
+                    Include unscored jobs (regardless of match filter)
+                  </label>
                   <div style={{display:"flex",alignItems:"center",gap:4,marginBottom:5}}>
                     <span style={{fontSize:9,color:"#a8a098",fontFamily:"monospace",letterSpacing:"0.05em"}}>SORT</span>
-                    {[["score","MATCH"],["posted","DATE"],["company","COMPANY"]].map(([key,label])=>(
+                    {[["discovered","FOUND"],["posted","POSTED"],["score","MATCH"],["company","COMPANY"]].map(([key,label])=>(
                       <button key={key} onClick={()=>setSortBy(key)} title={
                         key==="score" ? "best match first, across all dates"
+                        : key==="discovered" ? "group by when this app first discovered the job"
                         : key==="posted" ? "group by posting date, best match within each group"
                         : "alphabetical by company, best match within each"
                       } style={{
@@ -1257,6 +1331,7 @@ export default function App() {
                   background:"#ede8de",
                 }}>
                   <span style={{fontWeight:700,letterSpacing:"0.1em",color:"#5e5850"}}>{visible.length} JOBS</span>
+                  <span>· {unscored.length} unscored</span>
                   <span>· click to inspect · opens URL · auto-marks VIEWED</span>
                   <div style={{flex:1}}/>
                   <button onClick={fetchJobs} style={{background:"none",border:"none",color:"#8a8278",cursor:"pointer"}}>↺</button>
@@ -1298,7 +1373,7 @@ export default function App() {
                               <div style={{fontSize:11,fontWeight:600,color:"#2c2820",marginBottom:2,
                                 overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{j.title}</div>
                               <div style={{fontSize:9,color:"#7a7268",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                                {j.company} · {j.location}{j.posted_at && ` · ${timeAgo(j.posted_at)}`}
+                                {j.company} · {j.location}{j.scraped_at && ` · found ${timeAgo(j.scraped_at)}`}{j.posted_at && ` · posted ${timeAgo(j.posted_at)}`}
                               </div>
                             </div>
                             <Badge status={j.status}/>

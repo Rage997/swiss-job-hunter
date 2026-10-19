@@ -137,10 +137,12 @@ git clone https://github.com/Donvink/swiss-job-hunter.git
 cd swiss-job-hunter
 
 pip install -r requirements.txt
-playwright install chromium
+python -m playwright install chromium
 
 cd ui && npm install && cd ..
 ```
+
+After upgrading Python dependencies, rerun `python -m playwright install chromium` in the same virtual environment: a new Playwright version needs its matching browser. Docker installs the matching version during the image build.
 
 ### 2. Configure
 
@@ -246,34 +248,41 @@ The sidebar guides you through the full pipeline:
 
 Pick a direction (ALL / AGENT / PERCEPTION / …), then choose keywords and sources.
 
-- **Keyword presets** — click **⚡ PERCEPTION** or **⚡ AGENT** to instantly load a curated keyword group and switch to the matching direction:
+- **Keyword presets** — click a preset to load its keyword group without changing the CV direction. **USE ALL KEYWORD PRESETS** combines every configured group, deduplicating keywords; the summary shows how many keywords and sources will actually run:
   - **PERCEPTION**: `computer vision engineer`, `ADAS engineer`, `sensor fusion engineer`, `autonomous driving engineer`, `robotics engineer`, `perception engineer`, `SLAM engineer`, `robot perception engineer`, `motion planning engineer`, `autonomous systems engineer`, `robotics software engineer`
   - **AGENT**: `machine learning engineer`, `AI engineer`, `deep learning engineer`, `LLM Application Engineer`, `agentic AI`, `GenAI engineer`, `MLOps engineer`, `AI software engineer`, `applied scientist`
 - **Batch keywords** — type a keyword and press **Enter** or **,** (comma) to add it as a tag; press **Backspace** to remove the last one. All keywords are searched in sequence across every selected source.
 - **Location** — leave blank for all Switzerland, or type a city. **ALL CH** button clears it.
-- **Pages** — number of pages to fetch per source per keyword.
+- **Pages** — maximum pages per source per keyword, initially `SCRAPER_MAX_PAGES`. The API and CLI use the same configured default. SwissDevJobs uses a complete, unpaginated inventory.
+- **Radius** — initially `SEARCH_RADIUS_KM`; applied to LinkedIn (converted to miles) and eFinancialCareers. Other boards use native city/region searches; JobScout24 uses its 20 km city area. Blank location means all Switzerland, not a radius search.
 - **Sources** — toggle individual boards or use **ALL**.
+- Search controls are remembered in this browser, including a deliberately blank location. Saved choices override configuration defaults on reload. Only directions with an actual `data/cv_<direction>.txt` appear in the CV selector; **ALL** does not select every keyword preset.
 
 When **LinkedIn** is selected, two extra dropdowns appear:
-- **Time range** — 24h / 7 days / 30 days
-- **Experience level** — Entry–Senior / Associate–Senior (default) / Senior only / Senior–Director
+- **Time range** — Any time (default) / 24h / 7 days / 30 days
+- **Experience level** — All levels (default) / Entry–Senior / Associate–Senior / Senior only / Senior–Director
+- Set `LINKEDIN_TIME_RANGE` and `LINKEDIN_EXPERIENCE_LEVEL` to change those defaults; empty values omit the filters. Pagination advances by the number of cards actually returned, not the requested page size. LinkedIn can still cap or block results.
 
-**RUN SEARCH** scrapes only. **⚡ SEARCH + ENRICH + SCORE** runs the full pipeline in one click:
+**SEARCH + SCORE (KEYWORD)** and **SEARCH + SCORE (KEYWORD + LLM)** run the full pipeline:
 1. Search all keywords across selected sources (with automatic 5s LinkedIn cooldown between keywords)
 2. Enrich descriptions for every source
-3. LLM score all enriched jobs
+3. Score eligible, previously unscored jobs using the selected mode. Use **RESCORE ALL** explicitly to revisit existing keyword scores or older LLM assessments.
 
 The pipeline button is protected against double-clicks — a second click while running logs `✗ Pipeline already running` and is ignored.
+Source errors, incomplete streams and scoring failures are reported as pipeline errors rather than a successful completion. Earlier successfully saved jobs are retained.
 
 **② PIPELINE**
 - **ENRICH DESCRIPTIONS** — fetches full JDs for jobs that only have a preview snippet
 - **ENRICH + LLM SCORE** — enriches then immediately scores with LLM in one step
 - **SCORE (KEYWORD)** — fast keyword match against your CV. The keywords are extracted from the CV by the LLM once and cached until the CV changes; every score after that is free
-- **SCORE (LLM)** — two-stage: keyword pre-filter first (skills extracted from your CV, cached to `data/cv_keywords_{direction}.json`); jobs below the threshold are archived without an LLM call, the rest get full deep analysis via Claude/DeepSeek
+- **SCORE (LLM)** — keyword pre-filter first using CV-derived skills; known missing skills below the threshold can skip the LLM. An unknown vocabulary is not evidence of a mismatch and proceeds to deep analysis. Descriptions shorter than 400 characters remain unscored for enrichment.
+- Invalid, truncated or out-of-range LLM scoring responses leave the job's existing score and status unchanged. A valid score of zero remains a real assessment. Local llama.cpp uses `LLAMA_CPP_THINK` through its `reasoning_effort` API parameter.
 - **LOOKUP COMPANIES** — generates a short LLM summary for each company, cached
 - **PREVIEW / PURGE** — dry-run or delete scored jobs below a score threshold
 
 **FILTER** — filter by status (NEW / SHORTLISTED / VIEWED / CONSIDERING / APPLIED / …), minimum star rating (★–★★★★★), minimum match score (≥ N%), and free-text search
+
+Unscored, non-archived jobs appear in **Not scored**, even above a positive match filter, unless **Include unscored jobs** is disabled. **FOUND** (default) groups scored jobs by discovery date; **POSTED** uses the publisher's date. These are different: a newly discovered vacancy may have been published weeks ago. **MATCH** and **COMPANY** sorting remain available. The display match filter is separate from the operational archive/purge threshold.
 
 **LOG** — live SSE output from every pipeline operation; shows a pulsing **●** indicator while any operation is running, and per-source progress every 10 jobs fetched
 
@@ -369,7 +378,7 @@ sjh digest
 | jobs.ch | JSON-LD + HTML detail | Primary Swiss board; run `sjh enrich` after a search to pull the full descriptions |
 | jobscout24.ch | JSON API | Large Swiss generalist board |
 | jobup.ch | JSON API + HTML detail | French-speaking Switzerland |
-| swissdevjobs.ch | HTML / BS4 | IT & software focused |
+| swissdevjobs.ch | Public JSON inventory + detail API | Full active inventory from `api/jobsLight`; full descriptions from `api/jobWithUrl`; keyword matching covers title, company and technology tags |
 | züri.jobs | JSON-LD + HTML | Zürich-focused |
 | efinancialcareers.ch | JSON + HTML | Finance & banking |
 | linkedin.com | HTTP guest API | No login required; set `LINKEDIN_COOKIE` for more results; experience level filter (`f_E`) configurable in UI |
@@ -378,7 +387,7 @@ sjh digest
 
 A source that breaks — endpoint withdrawn, markup changed, bot-blocked — is
 reported as a failure rather than as an empty result: the CLI lists it under
-"Failed sources" and the web UI names it in the run summary.
+"Failed sources" and the web UI names it in the run summary. This includes a later page failing after earlier pages succeeded; partial results remain saved, but the run is not reported as complete.
 
 ---
 

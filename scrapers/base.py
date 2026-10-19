@@ -74,6 +74,7 @@ class BaseScraper(ABC):
 
     def __init__(self) -> None:
         self._client: Optional[httpx.AsyncClient] = None
+        self.radius_km = settings.search_radius_km
 
     @property
     @abstractmethod
@@ -137,17 +138,10 @@ class BaseScraper(ABC):
         return response
 
     def _page_error(self, page: int, exc: Exception, yielded: int) -> None:
-        """
-        Handle a page that could not be fetched or parsed.
-
-        Nothing yielded yet means the source itself is broken — the endpoint
-        moved, we are blocked, or the markup changed — so raise and let the
-        caller say so. Once some jobs are through, a later page failing is just
-        a truncated run: log it and let the caller stop where it is.
-        """
-        if yielded == 0:
-            raise ScraperError(f"{self.source_name}: {exc}") from exc
-        print(f"[{self.source_name}] page {page} error after {yielded} jobs: {exc}")
+        """Surface incomplete searches even when earlier pages produced jobs."""
+        raise ScraperError(
+            f"{self.source_name}: page {page} failed after {yielded} jobs: {exc}"
+        ) from exc
 
     async def _polite_delay(self) -> None:
         """Random delay to avoid hammering servers."""
