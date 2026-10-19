@@ -650,10 +650,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch(`${API}/config`).then(r => {
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      return r.json();
-    }).then(cfg => {
+    let cancelled = false;
+    Promise.all(["config", "directions"].map(async endpoint => {
+      const response = await fetch(`${API}/${endpoint}`);
+      if (!response.ok) throw new Error(`${endpoint}: HTTP ${response.status}`);
+      return response.json();
+    })).then(([cfg, dirs]) => {
+      if (cancelled) return;
       const saved = savedSearch;
       setSearchKws(Array.isArray(saved.keywords) && saved.keywords.every(k => typeof k === "string")
         ? saved.keywords : [cfg.default_keyword]);
@@ -666,12 +669,13 @@ export default function App() {
       setLinkedinExpLevel(typeof saved.experience === "string" ? saved.experience : cfg.linkedin_experience_level);
       setRadiusNote(cfg.radius_note);
       setKeywordPresets(cfg.keyword_presets || {});
-      setSearchReady(true);
-    }).catch(e => setSearchConfigError(`Search settings unavailable: ${e.message}. Reload to retry.`));
-    fetch(`${API}/directions`).then(r=>r.ok?r.json():[]).then(dirs=>{
       setDirections(dirs);
-      setDirection(dirs.includes(savedSearch.direction) ? savedSearch.direction : "all");
-    }).catch(()=>{});
+      setDirection(dirs.includes(saved.direction) ? saved.direction : "all");
+      setSearchReady(true);
+    }).catch(e => {
+      if (!cancelled) setSearchConfigError(`Search settings unavailable: ${e.message}. Reload to retry.`);
+    });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -1140,6 +1144,8 @@ export default function App() {
                       <option value="r86400">LinkedIn · 24h</option>
                       <option value="r604800">LinkedIn · 7 days</option>
                       <option value="r2592000">LinkedIn · 30 days</option>
+                      {!["", "r86400", "r604800", "r2592000"].includes(linkedinTimeRange) &&
+                        <option value={linkedinTimeRange}>LinkedIn · Custom time range ({linkedinTimeRange})</option>}
                     </select>
                     <select value={linkedinExpLevel} onChange={e=>setLinkedinExpLevel(e.target.value)}
                       style={{...inp,marginBottom:0,fontSize:9,color:"#5e5850"}}>
@@ -1148,6 +1154,8 @@ export default function App() {
                       <option value="3,4">LinkedIn · Associate–Senior</option>
                       <option value="4">LinkedIn · Senior only</option>
                       <option value="4,5">LinkedIn · Senior–Director</option>
+                      {!["", "2,3,4", "3,4", "4", "4,5"].includes(linkedinExpLevel) &&
+                        <option value={linkedinExpLevel}>LinkedIn · Custom experience levels ({linkedinExpLevel})</option>}
                     </select>
                   </>)}
                   <div style={{display:"flex",flexDirection:"column",gap:8}}>

@@ -348,3 +348,67 @@ async def test_fetch_still_retries_a_transient_status():
     with pytest.raises(httpx.HTTPStatusError):
         await scraper._fetch("https://example.ch/flaky")
     assert len(calls) == 3
+
+
+@pytest.fixture
+def financial_search(monkeypatch):
+    from scrapers import efinancialcareers
+    from scrapers.base import ScrapedJob
+
+    page = MagicMock()
+    page.goto = AsyncMock(return_value=MagicMock(status=200))
+    page.query_selector_all = AsyncMock()
+    page.get_by_text.return_value.first.is_visible = AsyncMock(return_value=True)
+    ready = page.locator.return_value.or_.return_value.first
+    ready.wait_for = AsyncMock()
+    browser = MagicMock()
+    browser.new_context = AsyncMock(
+        return_value=MagicMock(new_page=AsyncMock(return_value=page))
+    )
+    browser.close = AsyncMock()
+    playwright = MagicMock()
+    playwright.chromium.launch = AsyncMock(return_value=browser)
+    manager = MagicMock()
+    manager.__aenter__ = AsyncMock(return_value=playwright)
+    manager.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(efinancialcareers, "async_playwright", lambda: manager)
+
+    scraper = efinancialcareers.EFinancialCareersScraper()
+    scraper._parse_card = AsyncMock(return_value=ScrapedJob(
+        "Python Engineer", "Acme", "Bern", "", "https://example.test/jobs/1",
+        scraper.source_name, "1",
+    ))
+    return scraper, page, ready
+
+
+@pytest.mark.parametrize("has_results", [False, True])
+async def test_financial_search_stops_at_explicit_empty_results(financial_search, has_results):
+    scraper, page, _ = financial_search
+    page.query_selector_all.side_effect = [[object()], []] if has_results else [[]]
+
+    jobs = [job async for job in scraper.scrape("Python", "Bern", max_pages=5)]
+
+    assert [job.source_job_id for job in jobs] == (["1"] if has_results else [])
+    assert page.goto.await_count == (2 if has_results else 1)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "http", "missing_results"])
+async def test_financial_search_preserves_results_but_reports_failure(financial_search, failure):
+    from playwright.async_api import TimeoutError
+    from scrapers.base import ScraperError
+
+    scraper, page, ready = financial_search
+    page.query_selector_all.side_effect = [[object()], []]
+    if failure == "timeout":
+        ready.wait_for.side_effect = [None, TimeoutError("Blocked or changed markup")]
+    elif failure == "http":
+        page.goto.side_effect = [MagicMock(status=200), MagicMock(status=503)]
+    else:
+        page.get_by_text.return_value.first.is_visible.return_value = False
+
+    jobs = []
+    with pytest.raises(ScraperError, match="page 2 failed after 1 jobs"):
+        async for job in scraper.scrape("Python", "Bern", max_pages=5):
+            jobs.append(job)
+
+    assert [job.source_job_id for job in jobs] == ["1"]

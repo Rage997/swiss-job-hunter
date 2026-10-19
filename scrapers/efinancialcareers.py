@@ -26,6 +26,12 @@ _CH_TERMS = re.compile(
     r"\bch\b",
     re.IGNORECASE,
 )
+_NO_RESULTS = re.compile(
+    r"^\s*(?:no (?:jobs|results)(?: found)?|"
+    r"keine (?:jobs|stellenangebote|ergebnisse)(?: gefunden)?|"
+    r"aucun(?:e)? (?:offre|emploi|résultat)(?: trouv[ée])?)\s*[.!]?\s*$",
+    re.IGNORECASE,
+)
 
 
 class EFinancialCareersScraper(BaseScraper):
@@ -50,18 +56,20 @@ class EFinancialCareersScraper(BaseScraper):
                         f"&currencyCode=CHF&language=de&enableVectorSearch=true"
                         f"&page={page_num}"
                     )
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    response = await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                    if response is not None and response.status >= 400:
+                        self._page_error(page_num, RuntimeError(f"HTTP {response.status}"), yielded)
+                    empty = page.get_by_text(_NO_RESULTS).first
                     try:
-                        await page.wait_for_selector("[class*='job-card']", timeout=10_000)
+                        await page.locator("[class*='job-card']").or_(empty).first.wait_for(timeout=10_000)
                     except Exception as exc:
-                        # No cards at all on the first page means the layout moved,
-                        # not that the search came back empty.
                         self._page_error(page_num, exc, yielded)
-                        break
 
                     cards = await page.query_selector_all("[class*='job-card']")
                     if not cards:
-                        break
+                        if await empty.is_visible():
+                            break
+                        self._page_error(page_num, RuntimeError("Missing search results"), yielded)
 
                     for card in cards:
                         job = await self._parse_card(card)

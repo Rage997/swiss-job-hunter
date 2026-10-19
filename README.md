@@ -256,12 +256,12 @@ Pick a direction (ALL / AGENT / PERCEPTION / …), then choose keywords and sour
 - **Pages** — maximum pages per source per keyword, initially `SCRAPER_MAX_PAGES`. The API and CLI use the same configured default. SwissDevJobs uses a complete, unpaginated inventory.
 - **Radius** — initially `SEARCH_RADIUS_KM`; applied to LinkedIn (converted to miles) and eFinancialCareers. Other boards use native city/region searches; JobScout24 uses its 20 km city area. Blank location means all Switzerland, not a radius search.
 - **Sources** — toggle individual boards or use **ALL**.
-- Search controls are remembered in this browser, including a deliberately blank location. Saved choices override configuration defaults on reload. Only directions with an actual `data/cv_<direction>.txt` appear in the CV selector; **ALL** does not select every keyword preset.
+- Search controls are remembered in this browser, including a deliberately blank location. Saved choices override configuration defaults on reload. Search stays disabled until both settings and CV directions load; a loading failure preserves saved choices and asks you to reload. Only directions with an actual `data/cv_<direction>.txt` appear in the CV selector; **ALL** does not select every keyword preset.
 
 When **LinkedIn** is selected, two extra dropdowns appear:
 - **Time range** — Any time (default) / 24h / 7 days / 30 days
 - **Experience level** — All levels (default) / Entry–Senior / Associate–Senior / Senior only / Senior–Director
-- Set `LINKEDIN_TIME_RANGE` and `LINKEDIN_EXPERIENCE_LEVEL` to change those defaults; empty values omit the filters. Pagination advances by the number of cards actually returned, not the requested page size. LinkedIn can still cap or block results.
+- Set `LINKEDIN_TIME_RANGE` and `LINKEDIN_EXPERIENCE_LEVEL` to change those defaults; empty values omit the filters. Values outside the dropdown presets appear as a selected **Custom** option showing the exact filter value. Pagination advances by the number of cards actually returned, not the requested page size. LinkedIn can still cap or block results.
 
 **SEARCH + SCORE (KEYWORD)** and **SEARCH + SCORE (KEYWORD + LLM)** run the full pipeline:
 1. Search all keywords across selected sources (with automatic 5s LinkedIn cooldown between keywords)
@@ -388,6 +388,7 @@ sjh digest
 A source that breaks — endpoint withdrawn, markup changed, bot-blocked — is
 reported as a failure rather than as an empty result: the CLI lists it under
 "Failed sources" and the web UI names it in the run summary. This includes a later page failing after earlier pages succeeded; partial results remain saved, but the run is not reported as complete.
+eFinancialCareers treats an explicit no-results message as normal pagination exhaustion. A missing results section without that message, or an HTTP error, remains a source failure.
 
 ---
 
